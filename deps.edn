@@ -6,7 +6,7 @@
  {;; Postgres: the queries and the table maps
   io.github.p4ulcristian/cellar {:git/tag "v0.1.3" :git/sha "e23e1b4"}
   ;; a background job's params, checked by its shape and kept as JSON text
-  io.github.p4ulcristian/wire   {:git/tag "v0.1.3" :git/sha "0d446b3"}}
+  io.github.p4ulcristian/wire   {:git/tag "v0.1.4" :git/sha "5473cf1"}}
 
  :aliases
  {;; the tests:  clojure -X:test  (the Postgres ones need BACKROOM_TEST_PORT, see README.md)
