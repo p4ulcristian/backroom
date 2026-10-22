@@ -1,0 +1,47 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "semanticCommits": "disabled",
+  "commitMessagePrefix": "[Deps]",
+  "commitMessageAction": "Bump",
+  "commitMessageTopic": "{{depName}}",
+  "commitMessageExtra": "{{currentVersion}} -> {{newVersion}}",
+  "prConcurrentLimit": 5,
+  "packageRules": [
+    {
+      "description": "Majors land on the Dependency Dashboard as opt-in checkboxes (no auto-PR).",
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "Group React core packages.",
+      "matchPackageNames": ["react", "react-dom"],
+      "groupName": "react"
+    },
+    {
+      "description": "Group all GitHub Actions version bumps.",
+      "matchManagers": ["github-actions"],
+      "groupName": "github-actions"
+    },
+    {
+      "description": "Group npm patch + minor updates into one PR.",
+      "matchManagers": ["npm"],
+      "matchUpdateTypes": ["patch", "minor"],
+      "groupName": "npm non-major"
+    },
+    {
+      "description": "Group Clojure (deps.edn) minor + patch into one PR; majors stay individual.",
+      "matchManagers": ["deps-edn"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "clojure deps (minor + patch)"
+    }
+  ],
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 6am on monday"],
+    "commitMessageAction": "Refresh",
+    "commitMessageTopic": "lockfile"
+  }
+}
