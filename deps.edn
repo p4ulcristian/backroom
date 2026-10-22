@@ -1,0 +1,18 @@
+;; backroom: background jobs on Postgres. A queue, workers and schedules.
+;; One tree: source-code/backroom/.
+{:paths ["source-code"]
+
+ :deps
+ {;; Postgres: the queries and the table maps
+  io.github.p4ulcristian/cellar {:git/tag "v0.1.1" :git/sha "1354d94"}
+  ;; a background job's params, checked by its shape and kept as JSON text
+  io.github.p4ulcristian/wire   {:git/tag "v0.1.2" :git/sha "1e8e9aa"}}
+
+ :aliases
+ {;; the tests:  clojure -X:test  (the Postgres ones need BACKROOM_TEST_PORT, see README.md)
+  :test {:extra-paths ["test-code"]
+         :extra-deps  {io.github.cognitect-labs/test-runner {:git/tag "v0.5.1" :git/sha "dfb30dd"}
+                       ;; HikariCP (in cellar) logs through SLF4J; tests pick no logger
+                       org.slf4j/slf4j-nop {:mvn/version "2.0.17"}}
+         :exec-fn     cognitect.test-runner.api/test
+         :exec-args   {:dirs ["test-code"]}}}}
