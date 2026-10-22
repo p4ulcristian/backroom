@@ -43,7 +43,7 @@ their types). One public namespace, `backroom.api`; its part is
 (def send-nightly-report
   {:name :reports/send-nightly-report :params-shape [:map] :run (fn [_ _] …) :timeout-ms 600000 :attempts 3})
 
-(cellar/migrate! pool (into app-tables backroom/background-jobs-tables) changes migrate-options) ; cellar v0.1.2's options
+(cellar/migrate! pool (into app-tables backroom/background-jobs-tables) changes migrate-options) ; cellar's migrate! options
 
 (def workers (backroom/start-workers! pool {:kinds                     [send-invoice-email send-nightly-report]
                                             :schedules                 [{:kind send-nightly-report :params {} :cron "0 1 * * *"}]

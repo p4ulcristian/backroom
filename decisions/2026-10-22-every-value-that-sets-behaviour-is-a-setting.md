@@ -1,5 +1,7 @@
 # Every value that sets behaviour is a setting; no hidden defaults
 
+> **Changed in part** by cellar's [A column says only the options it has](https://github.com/p4ulcristian/cellar/blob/main/decisions/2026-10-22-a-column-says-only-the-options-it-has.md) (2026-10-22, v0.1.3, with cellar v0.1.3): backroom's columns say only the options they have; its tables still write out `:indexes`, `:gates` and `:on-change`.
+
 > Changes in part [A job kind is a map, and the library makes its own tables](2026-10-22-a-job-kind-is-a-map-and-the-library-makes-its-own-tables.md) (the retry waits, the stuck job's minute and the week done jobs are kept were fixed) and [A job can give up for good](2026-10-12-a-job-can-give-up-for-good.md) (the give-up exception takes its data always). Since v0.1.2.
 
 **Decision:** every value that sets how backroom behaves is written out by the app: a setting, a required option or a required key, checked by malli before anything runs, the maps closed, a missing or unknown key refused, named, with every other problem at once (`:backroom/bad-options`, `:backroom/bad-kind`). No function fills in a value: there is no shorter arity, no `:or`, no optional key. What stays fixed is listed below, each with its reason.

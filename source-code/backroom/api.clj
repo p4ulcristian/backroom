@@ -85,25 +85,22 @@
    backroom.settings/settings-shape for each key."
   settings/settings-shape)
 
-(def ^:private no-options
-  {:primary-key? false :optional? false :unique? false :default nil :references nil})
-
 (def background-jobs-table
   "The queue: one row per background job."
   {:table     :backroom/background-jobs
-   :columns   [[:background-job/id           :uuid         (assoc no-options :primary-key? true :default :random-uuid)]
-               [:background-job/kind         :string       no-options]
-               [:background-job/params       :string       no-options]      ; JSON text, through wire
-               [:background-job/state        [:enum "queued" "running" "done" "dead"] (assoc no-options :default "queued")]
-               [:background-job/run-at       :time/instant (assoc no-options :default :now)]
-               [:background-job/attempts     :int          (assoc no-options :default 0)]
-               [:background-job/max-attempts :int          no-options]
-               [:background-job/timeout-ms   :int          no-options]
-               [:background-job/last-error   :string       (assoc no-options :optional? true)]
-               [:background-job/locked-at    :time/instant (assoc no-options :optional? true)]
-               [:background-job/created-at   :time/instant (assoc no-options :default :now)]
-               [:background-job/finished-at  :time/instant (assoc no-options :optional? true)]
-               [:background-job/key          :string       (assoc no-options :optional? true :unique? true)]]
+   :columns   [[:background-job/id           :uuid         {:primary-key? true :default :random-uuid}]
+               [:background-job/kind         :string]
+               [:background-job/params       :string]      ; JSON text, through wire
+               [:background-job/state        [:enum "queued" "running" "done" "dead"] {:default "queued"}]
+               [:background-job/run-at       :time/instant {:default :now}]
+               [:background-job/attempts     :int          {:default 0}]
+               [:background-job/max-attempts :int]
+               [:background-job/timeout-ms   :int]
+               [:background-job/last-error   :string       {:optional? true}]
+               [:background-job/locked-at    :time/instant {:optional? true}]
+               [:background-job/created-at   :time/instant {:default :now}]
+               [:background-job/finished-at  :time/instant {:optional? true}]
+               [:background-job/key          :string       {:optional? true :unique? true}]]
    :indexes   [[:background-job/state :background-job/run-at]]
    :gates     nil
    :on-change nil})
@@ -111,8 +108,8 @@
 (def background-job-schedules-table
   "The schedules: the next time each runs."
   {:table     :backroom/background-job-schedules
-   :columns   [[:background-job-schedule/key     :string       (assoc no-options :primary-key? true)]
-               [:background-job-schedule/next-at :time/instant no-options]]
+   :columns   [[:background-job-schedule/key     :string       {:primary-key? true}]
+               [:background-job-schedule/next-at :time/instant]]
    :indexes   []
    :gates     nil
    :on-change nil})

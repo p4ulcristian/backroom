@@ -7,4 +7,4 @@ The first two were made while backroom was a library inside Groundwork, a Clojur
 - [A job can give up for good](2026-10-12-a-job-can-give-up-for-good.md), changed in part by [Every value that sets behaviour is a setting](2026-10-22-every-value-that-sets-behaviour-is-a-setting.md)
 - [A job kind is a map, and the library makes its own tables](2026-10-22-a-job-kind-is-a-map-and-the-library-makes-its-own-tables.md), changed in part by Groundwork's "Groundwork's own tables are table maps, in their own folder" and "The background work is called background jobs", by [backroom is its own library](2026-10-22-backroom-is-its-own-library.md), and by [Every value that sets behaviour is a setting](2026-10-22-every-value-that-sets-behaviour-is-a-setting.md)
 - [backroom is its own library](2026-10-22-backroom-is-its-own-library.md)
-- [Every value that sets behaviour is a setting; no hidden defaults](2026-10-22-every-value-that-sets-behaviour-is-a-setting.md)
+- [Every value that sets behaviour is a setting; no hidden defaults](2026-10-22-every-value-that-sets-behaviour-is-a-setting.md), changed in part by cellar's "A column says only the options it has"
