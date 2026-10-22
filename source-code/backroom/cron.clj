@@ -41,6 +41,11 @@
      :any-day? (= "*" dom)
      :any-dow? (= "*" dow)}))
 
+;; how many steps (a month, a day, an hour or a minute each) the search for
+;; the next time takes before it says the line never comes: a fixed bound,
+;; not a choice, years past any line that can come (29 February on a Monday)
+(def ^:private most-steps 600000)
+
 (defn find-next-time-for-cron-line
   "The first minute after `after` (an Instant) that a cron line allows, UTC."
   ^Instant [line ^Instant after]
@@ -55,7 +60,7 @@
     (loop [t (.plusMinutes (.truncatedTo (LocalDateTime/ofInstant after ZoneOffset/UTC) ChronoUnit/MINUTES) 1)
            n 0]
       (cond
-        (> n 600000)
+        (> n most-steps)
         (throw (ex-info (str "This cron line never comes: " line) {:type :backroom/bad-cron :line line}))
 
         (not (contains? months (.getMonthValue t)))
