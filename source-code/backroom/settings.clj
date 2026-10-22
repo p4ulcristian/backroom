@@ -6,7 +6,8 @@
    malli itself, not through wire: they are values the app hands in, not
    data crossing an edge. The functions that keep or read a background
    job's params take the app's wire under :wire in their options; backroom
-   never makes one."
+   never makes one. start-workers! takes the app's log under :log; backroom
+   never decides how a line is written."
   (:require
    [malli.core :as malli]
    [malli.error :as malli-error]))
@@ -42,7 +43,9 @@
 (def kind-shape
   "A background job kind, every key required. :name, a namespaced keyword;
    :params-shape, the malli shape its params fit; :run, (fn [context
-   params]); :timeout-ms, how long one run may take; :attempts, how many
+   params]), the context {:transaction :background-job-id :attempt :log},
+   :log the workers' log with the background job's id and kind as its
+   context; :timeout-ms, how long one run may take; :attempts, how many
    runs it gets before it is dead."
   [:map {:closed true}
    [:name :qualified-keyword]
@@ -64,11 +67,19 @@
    come out by it."
   [:wire [some? {:error/message "should be the app's wire, made by wire.api/make-wire-from-settings"}]])
 
+(def log-entry
+  "The app's log function, (log level event data), made by logbook's
+   log-function or with-context: a failure, a background job given up and
+   a dispatcher that failed are written to it, and each run gets one with
+   its background job's id and kind as context."
+  [:log [fn? {:error/message "should be the app's log function, made by logbook"}]])
+
 (def workers-options-shape
-  "start-workers!'s options: the app's wire, the settings, the kinds this
-   server runs and the schedules, every key required."
+  "start-workers!'s options: the app's wire and log, the settings, the
+   kinds this server runs and the schedules, every key required."
   (into [:map {:closed true}
          wire-entry
+         log-entry
          [:kinds [:sequential kind-shape]]
          [:schedules [:sequential schedule-shape]]]
         settings-entries))

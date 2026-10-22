@@ -1,5 +1,7 @@
 # Every value that sets behaviour is a setting; no hidden defaults
 
+> **Changed in part** by [The app passes its log](2026-10-22-the-app-passes-its-log.md) (2026-10-22, v0.3.0): backroom writes to the app's log, `:log` in `start-workers!`'s options, not to `System.Logger` `backroom`.
+
 > **Changed in part** by [The app passes its wire; backroom never makes one](2026-10-22-the-app-passes-its-wire.md) (2026-10-22, v0.2.0): `add-background-job-to-queue!` and `start-workers!` take the app's wire, `:wire`, in their options; the checks are malli's own.
 
 > **Changed in part** by cellar's [A column says only the options it has](https://github.com/p4ulcristian/cellar/blob/main/decisions/2026-10-22-a-column-says-only-the-options-it-has.md) (2026-10-22, v0.1.3, with cellar v0.1.3): backroom's columns say only the options they have; its tables still write out `:indexes`, `:gates` and `:on-change`.

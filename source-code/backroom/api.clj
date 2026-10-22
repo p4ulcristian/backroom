@@ -6,12 +6,13 @@
      (def send-invoice-email
        {:name         :app.mail/send-invoice-email
         :params-shape [:map [:order/id :int]]
-        :run          (fn [background-job-context params] …)   ; background-job-context: :transaction :background-job-id :attempt
+        :run          (fn [background-job-context params] …)   ; background-job-context: :transaction :background-job-id :attempt :log
         :timeout-ms   60000
         :attempts     5})
 
-     ;; the app's wire, made once by the app (backroom never makes one)
+     ;; the app's wire and log, made once by the app (backroom makes neither)
      (def wire (wire.api/make-wire-from-settings wire-settings))
+     (def log (logbook.api/log-function (logbook.api/make-logbook logbook-settings)))
 
      ;; in a request's transaction: the background job exists only if that commits
      (backroom/add-background-job-to-queue! transaction send-invoice-email {:order/id 42}
@@ -19,6 +20,7 @@
 
      ;; on each server that runs background jobs
      (backroom/start-workers! pool {:wire                      wire
+                                    :log                       log
                                     :kinds                     [send-invoice-email]
                                     :schedules                 [{:kind send-nightly-report :params {} :cron \"0 1 * * *\"}]
                                     :workers                   4
@@ -46,15 +48,22 @@
    Every setting and option is required, checked first (backroom.settings).
 
    A schedule puts its kind's background job in the queue at each time its cron line
-   (UTC) allows; one server does it, whichever claims the schedule first."
+   (UTC) allows; one server does it, whichever claims the schedule first.
+
+   backroom writes to the app's log, :log, never anywhere else: each run
+   gets a log with {:background-job/id … :background-job/kind …} as its
+   context, in its context's :log, so its own lines carry the job; a
+   failure that runs again later is :warn :backroom/failed, one that ends
+   the background job (its last attempt, or a give-up) :error
+   :backroom/gave-up, both with the exception or the time limit."
   (:require
    [clojure.string :as str]
    [backroom.cron :as cron]
    [backroom.settings :as settings]
    [cellar.api :as cellar]
+   [logbook.api :as logbook]
    [wire.api :as wire])
   (:import
-   (java.lang System$Logger System$Logger$Level)
    (java.time Instant OffsetDateTime ZoneOffset)
    (java.util.concurrent ArrayBlockingQueue Semaphore TimeUnit)))
 
@@ -72,8 +81,6 @@
 (def ^:private update-schedule        (make-query "update_schedule_next_at.sql"))
 (def ^:private find-background-jobs-in-state     (make-query "find_background_jobs_in_state.sql"))
 (def ^:private update-background-job-to-run-again (make-query "update_background_job_to_run_again.sql"))
-
-(def ^:private ^System$Logger logger (System/getLogger "backroom"))
 
 (defn- turn-instant-into-utc [^Instant instant]
   (OffsetDateTime/ofInstant instant ZoneOffset/UTC))
@@ -184,9 +191,9 @@
   (long (min retry-max-wait-ms (* retry-first-wait-ms (Math/pow retry-wait-factor (dec attempt))))))
 
 (defn- run-background-job-and-catch
-  "Runs the background job's kind in one transaction. Returns :ok or what
-   was thrown."
-  [wire pool kinds-by-name {:background-job/keys [id kind params attempts]}]
+  "Runs the background job's kind in one transaction, with the background
+   job's log. Returns :ok or what was thrown."
+  [wire pool kinds-by-name log {:background-job/keys [id kind params attempts]}]
   (try
     (let [{:keys [run params-shape] :as background-job-kind} (get kinds-by-name kind)]
       (when-not background-job-kind
@@ -198,29 +205,39 @@
           (throw (ex-info "The background job's params don't fit its shape" {:errors errors})))
         (cellar/run-in-transaction! pool {:read-only? false}
           (fn [transaction]
-            (run {:transaction transaction :background-job-id id :attempt attempts} shaped-data)))
+            (run {:transaction transaction :background-job-id id :attempt attempts :log log} shaped-data)))
         :ok))
     (catch Throwable throwable throwable)))
 
+(defn- log-failure!
+  "A failure that runs again later is a warning; one that left the background
+   job dead (its last attempt, or a give-up) an error, kept for pulling."
+  [log state attempts retry-ms result]
+  (let [failure (if (= :timed-out result) {:background-job/ran-out-of-time? true} {:error result})]
+    (if (= "dead" state)
+      (log :error :backroom/gave-up (assoc failure :background-job/attempts attempts))
+      (log :warn :backroom/failed (assoc failure :background-job/attempt attempts :background-job/retry-in-ms retry-ms)))))
+
 (defn- run-claimed-background-job!
-  "Runs a claimed background job within its time limit and saves what happened."
-  [{:keys [wire pool kinds-by-name] :as running} {:background-job/keys [id kind attempts timeout-ms] :as background-job}]
+  "Runs a claimed background job within its time limit and saves what
+   happened; log is the background job's."
+  [{:keys [wire pool kinds-by-name] :as running} log {:background-job/keys [id attempts timeout-ms] :as background-job}]
   (let [outcome (promise)
-        thread  (Thread/startVirtualThread #(deliver outcome (run-background-job-and-catch wire pool kinds-by-name background-job)))
+        thread  (Thread/startVirtualThread #(deliver outcome (run-background-job-and-catch wire pool kinds-by-name log background-job)))
         result  (deref outcome timeout-ms :timed-out)]
     (when (= :timed-out result) (.interrupt thread))
     (if (= :ok result)
       (cellar/run-statement! pool update-background-job-to-done {:background-job/id id})
-      (do
-        (when (instance? Throwable result)
-          (.log logger System$Logger$Level/WARNING (str "Background job " kind " " id " failed") ^Throwable result))
-        (cellar/run-statement! pool update-background-job-to-failed
-                               {:background-job/id         id
-                                :background-job/retry-ms   (find-wait-before-retry-ms running attempts)
-                                :background-job/for-good   (and (instance? Throwable result) (does-failure-give-up? result))
-                                :background-job/last-error (if (= :timed-out result)
-                                                             (str "Ran longer than " timeout-ms " ms")
-                                                             (str (.getName (class result)) ": " (ex-message result)))})))))
+      (let [retry-ms (find-wait-before-retry-ms running attempts)
+            state    (:background-job/state
+                      (cellar/find-one-row pool update-background-job-to-failed
+                                           {:background-job/id         id
+                                            :background-job/retry-ms   retry-ms
+                                            :background-job/for-good   (and (instance? Throwable result) (does-failure-give-up? result))
+                                            :background-job/last-error (if (= :timed-out result)
+                                                                         (str "Ran longer than " timeout-ms " ms")
+                                                                         (str (.getName (class result)) ": " (ex-message result)))}))]
+        (log-failure! log state attempts retry-ms result)))))
 
 ;; -----------------------------------------------------------------------------
 ;; The workers
@@ -248,7 +265,7 @@
   "Until stopped: queue due schedules, queue stuck background jobs again, and give
    every free worker a due background job; then wait :poll-ms, or less when a worker
    finishes or the workers stop."
-  [{:keys [wire pool stopped ^Semaphore free-workers ^ArrayBlockingQueue wake schedules-by-key poll-ms stuck-after-time-limit-ms]
+  [{:keys [wire log pool stopped ^Semaphore free-workers ^ArrayBlockingQueue wake schedules-by-key poll-ms stuck-after-time-limit-ms]
     :as   running}]
   (while (not @stopped)
     (try
@@ -256,20 +273,23 @@
       (cellar/run-statement! pool update-stuck-background-jobs {:background-job/stuck-after-time-limit-ms stuck-after-time-limit-ms})
       (loop []
         (when (and (not @stopped) (.tryAcquire free-workers))
-          (if-let [background-job (cellar/find-one-row pool claim-next-background-job {})]
+          (if-let [background-job (some-> (cellar/find-one-row pool claim-next-background-job {})
+                                          (update :background-job/kind keyword))]
             (do (Thread/startVirtualThread
                  (fn []
-                   (try (run-claimed-background-job! running (update background-job :background-job/kind keyword))
-                        (catch Throwable e
-                          (.log logger System$Logger$Level/ERROR "A background job's outcome couldn't be saved" e))
-                        (finally
-                          (.release free-workers)
-                          (.offer wake :worker-free)))))
+                   (let [job-log (logbook/with-context log {:background-job/id   (:background-job/id background-job)
+                                                            :background-job/kind (:background-job/kind background-job)})]
+                     (try (run-claimed-background-job! running job-log background-job)
+                          (catch Throwable e
+                            (job-log :error :backroom/outcome-not-saved {:error e}))
+                          (finally
+                            (.release free-workers)
+                            (.offer wake :worker-free))))))
                 (recur))
             (.release free-workers))))
       (catch Throwable e
         (when-not @stopped
-          (.log logger System$Logger$Level/WARNING "The background job dispatcher failed; trying again" e))))
+          (log :warn :backroom/dispatcher-failed {:error e}))))
     (.poll wake (long poll-ms) TimeUnit/MILLISECONDS)))
 
 (defn start-workers!
@@ -277,6 +297,8 @@
    first (backroom.settings/workers-options-shape):
 
      :wire      the app's wire           every background job's params are read by it
+     :log       the app's log            what goes wrong is written to it; each run gets
+                                         one with its background job's id and kind
      :kinds     [background job kinds]   every kind this server runs
      :schedules [{:kind a-background-job-kind :params {…} :cron \"0 1 * * *\"}]
      and the settings (settings-shape): :workers :poll-ms
@@ -287,15 +309,17 @@
    the running workers."
   [pool options]
   (settings/check-workers-options options)
-  (let [{:keys [wire kinds schedules workers forget-done-after-ms]} options
+  (let [{:keys [wire log kinds schedules workers forget-done-after-ms]} options
         names (map :name kinds)]
+    ;; a log logbook didn't make can't carry a job's context: refused now, not at the first run
+    (logbook/with-context log {})
     (when (not= (count names) (count (set names)))
       (throw (ex-info (str "Background job kinds named twice: " (str/join " " names))
                       {:type :backroom/kind-named-twice})))
     (doseq [{:keys [cron]} schedules]
       (cron/turn-cron-line-into-allowed-values cron))
     (let [schedules-by-key (into {} (map (juxt #(make-schedule-key wire %) identity)) schedules)
-          running          (merge (select-keys options [:wire :workers :poll-ms :retry-first-wait-ms :retry-wait-factor
+          running          (merge (select-keys options [:wire :log :workers :poll-ms :retry-first-wait-ms :retry-wait-factor
                                                         :retry-max-wait-ms :stuck-after-time-limit-ms :stop-wait-ms])
                                   {:pool             pool
                                    :kinds-by-name    (into {} (map (juxt :name identity)) kinds)

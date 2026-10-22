@@ -14,13 +14,20 @@ io.github.p4ulcristian/backroom {:git/tag "v0.2.0" :git/sha "7797360"}
 ```
 
 Needs only [cellar](https://github.com/p4ulcristian/cellar) (Postgres, tables
-as maps) and [wire](https://github.com/p4ulcristian/wire) (params kept with
-their types). One public namespace, `backroom.api`; its part is
+as maps), [wire](https://github.com/p4ulcristian/wire) (params kept with
+their types) and [logbook](https://github.com/p4ulcristian/logbook) (the
+app's log, handed down). One public namespace, `backroom.api`; its part is
 `backroom.cron`.
 
 The app makes its wire once and hands it in: `add-background-job-to-queue!`
 and `start-workers!` take it under `:wire` in their options. backroom never
-makes a wire.
+makes a wire. So with the log: `start-workers!` takes the app's
+`(log level event data)` under `:log`, each run gets one with
+`{:background-job/id … :background-job/kind …}` as its context (its
+context's `:log`), and backroom writes only there: `:backroom/failed`
+(warn, runs again), `:backroom/gave-up` (error, dead),
+`:backroom/outcome-not-saved`, `:backroom/dispatcher-failed`
+([why](decisions/2026-10-22-the-app-passes-its-log.md)).
 
 ## The api
 
@@ -29,13 +36,14 @@ makes a wire.
 | `background-jobs-tables` `background-jobs-table` `background-job-schedules-table` | its two tables, `backroom.background_jobs` and `backroom.background_job_schedules`, as maps for cellar |
 | `add-background-job-to-queue!` | saves a background job of a kind, its params checked by the kind's `:params-shape`; options `:wire` (the app's), `:run-in-ms` and `:key` (nil, or one at a time), all written out |
 | `make-give-up-exception` | what a kind's `:run` throws to end its background job for good: dead at once, kept with the message |
-| `start-workers!` `stop-workers!` `settings-shape` | the workers on this server (`:wire` `:kinds` `:schedules` and the settings); stopping waits for running ones, at most `:stop-wait-ms`; the settings as a malli shape |
+| `start-workers!` `stop-workers!` `settings-shape` | the workers on this server (`:wire` `:log` `:kinds` `:schedules` and the settings); stopping waits for running ones, at most `:stop-wait-ms`; the settings as a malli shape |
 | `list-queued-background-jobs` `list-dead-background-jobs` | what waits, and what had all its attempts or gave up, with its last error |
 | `run-background-job-again-now!` | queues a dead or waiting background job to run now, its attempts counted afresh |
 
 ```clojure
 (require '[backroom.api :as backroom]
          '[cellar.api :as cellar]
+         '[logbook.api :as logbook]
          '[wire.api :as wire])
 
 ;; the app's wire, made once (wire's settings, every key written out)
@@ -46,10 +54,14 @@ makes a wire.
                        :max-name-length 50000 :max-document-length nil :max-token-count nil
                        :max-writing-nesting-depth 1000}}))
 
+;; the app's log, made once (logbook's settings, every key written out)
+(def log (logbook/log-function (logbook/make-logbook {:lowest-level :info :format :json
+                                                      :errors-kept 1000 :write-to :stdout})))
+
 (def send-invoice-email
   {:name         :billing/send-invoice-email
    :params-shape [:map [:order/id :uuid]]
-   :run          (fn [{:keys [transaction background-job-id attempt]} {:order/keys [id]}] …)
+   :run          (fn [{:keys [transaction background-job-id attempt log]} {:order/keys [id]}] …) ; log: the job's
    :timeout-ms   60000
    :attempts     5})
 
@@ -59,6 +71,7 @@ makes a wire.
 (cellar/migrate! pool (into app-tables backroom/background-jobs-tables) changes migrate-options) ; cellar's migrate! options
 
 (def workers (backroom/start-workers! pool {:wire                      wire
+                                            :log                       log
                                             :kinds                     [send-invoice-email send-nightly-report]
                                             :schedules                 [{:kind send-nightly-report :params {} :cron "0 1 * * *"}]
                                             :workers                   4
