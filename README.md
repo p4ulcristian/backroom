@@ -10,7 +10,7 @@ lets one give up for good. **The schedules:** cron lines in UTC that queue
 a background job at their times, on one server.
 
 ```clojure
-io.github.p4ulcristian/backroom {:git/tag "v0.5.0" :git/sha "357c34f"}
+io.github.p4ulcristian/backroom {:git/tag "v0.5.1" :git/sha "b2858dd"}
 ```
 
 Needs only [cellar](https://github.com/p4ulcristian/cellar) (Postgres, tables
