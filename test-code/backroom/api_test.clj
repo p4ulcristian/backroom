@@ -7,8 +7,10 @@
    [backroom.api :as backroom]
    [backroom.test-wire :refer [wire]]
    [cellar.api :as cellar]
+   [clojure.string :as str]
    [jsonista.core :as json]
-   [logbook.api :as logbook]))
+   [logbook.api :as logbook]
+   [meter.api :as meter]))
 
 (def ^:private port (some-> (System/getenv "BACKROOM_TEST_PORT") parse-long))
 
@@ -21,9 +23,8 @@
    :stuck-after-time-limit-ms 60000
    :forget-done-after-ms      604800000
    :forget-done-every-ms      3600000
-   :stop-wait-ms              5000})
-
-(def ^:private now {:wire wire :run-in-ms 0 :key nil})
+   :stop-wait-ms              5000
+   :metric-buckets            {:job-run-seconds [0.01 0.1 1 10]}})
 
 (def ^:private lines
   "The lines the tests' logbook wrote, as JSON data."
@@ -32,6 +33,23 @@
 (def ^:private log
   (logbook/log-function (logbook/make-logbook {:lowest-level :debug :format :json :errors-kept 100
                                                :write-to     #(swap! lines conj (json/read-value %))})))
+
+(defn- make-meter
+  "A new meter, as an app makes its own: each pool and each start-workers!
+   with other kinds takes its own."
+  []
+  (meter/make-meter {:jvm-metrics false :most-series-per-metric 10000} {:log log}))
+
+(def ^:private queue-meter
+  "The meter the tests that don't read it add background jobs with."
+  (make-meter))
+
+(def ^:private now {:wire wire :meter queue-meter :run-in-ms 0 :key nil})
+
+(defn- with-new-meter
+  "start-workers!'s options with the tests' wire and log, and a new meter."
+  [options]
+  (assoc options :wire wire :log log :meter (make-meter)))
 
 (defn- make-pool [user]
   (cellar/start-pool! {:host "localhost" :port port :database "postgres" :user user :password nil
@@ -42,8 +60,10 @@
                        :leak-warning-after-ms :none
                        :connect-timeout-seconds 10 :read-timeout-seconds :none :tcp-keepalive? false
                        :statement-timeout-ms 5000 :lock-timeout-ms :none :idle-in-transaction-timeout-ms :none
-                       :time-zone "UTC"}
-                      {:log log}))
+                       :time-zone "UTC"
+                       :metric-buckets {:query-seconds [0.01 0.1 1] :connection-acquire-seconds [0.01 0.1 1]
+                                        :connection-usage-seconds [0.01 0.1 1]}}
+                      {:log log :meter (make-meter)}))
 
 (defn- find-lines [event]
   (filterv #(= event (get % "event")) @lines))
@@ -89,7 +109,7 @@
       (try
         (make-tables-afresh! pool)
         (reset! emails-sent [])
-        (let [workers (backroom/start-workers! pool (assoc settings :wire wire :log log :kinds [send-invoice-email give-up] :schedules []))]
+        (let [workers (backroom/start-workers! pool (with-new-meter (assoc settings :kinds [send-invoice-email give-up] :schedules [])))]
           (try
             (testing "a queued background job runs, with its params as shaped data, and a log that knows it"
               (let [id (backroom/add-background-job-to-queue! pool send-invoice-email {:order/id 42} now)]
@@ -113,8 +133,8 @@
                           (get-in gave-up ["error" "message"])])
                       "a background job given up is an error, with its exception"))))
             (testing "one background job per key"
-              (is (= (backroom/add-background-job-to-queue! pool send-invoice-email {:order/id 1} {:wire wire :run-in-ms 60000 :key "k"})
-                     (backroom/add-background-job-to-queue! pool send-invoice-email {:order/id 1} {:wire wire :run-in-ms 60000 :key "k"}))))
+              (is (= (backroom/add-background-job-to-queue! pool send-invoice-email {:order/id 1} {:wire wire :meter queue-meter :run-in-ms 60000 :key "k"})
+                     (backroom/add-background-job-to-queue! pool send-invoice-email {:order/id 1} {:wire wire :meter queue-meter :run-in-ms 60000 :key "k"}))))
             (finally (is (backroom/stop-workers! workers) "every running background job had finished"))))
         (finally (cellar/stop-pool! pool))))))
 
@@ -129,7 +149,7 @@
         (cellar/grant-tables-to-role! owner-pool backroom/background-jobs-tables "backroom_app")
         (let [app-pool (make-pool "backroom_app")]
           (try
-            (let [workers (backroom/start-workers! app-pool (assoc settings :wire wire :log log :workers 1 :kinds [send-invoice-email] :schedules []))]
+            (let [workers (backroom/start-workers! app-pool (with-new-meter (assoc settings :workers 1 :kinds [send-invoice-email] :schedules [])))]
               (try
                 (testing "the app's role, granted backroom's tables by cellar, queues a background job and a worker claims and runs it"
                   (backroom/add-background-job-to-queue! app-pool send-invoice-email {:order/id 7} now)
@@ -148,28 +168,40 @@
   (testing "start-workers! names each missing setting, before anything runs"
     (let [{:keys [type errors]} (find-refusal #(backroom/start-workers! nil {:wire wire :log log :kinds [] :schedules [] :workers 1 :poll-ms 100}))]
       (is (= :backroom/bad-options type))
-      (is (= #{:retry-first-wait-ms :retry-wait-factor :retry-max-wait-ms :stuck-after-time-limit-ms
-               :forget-done-after-ms :forget-done-every-ms :stop-wait-ms}
+      (is (= #{:meter :retry-first-wait-ms :retry-wait-factor :retry-max-wait-ms :stuck-after-time-limit-ms
+               :forget-done-after-ms :forget-done-every-ms :stop-wait-ms :metric-buckets}
              (set (keys errors))))))
   (testing "and an unknown one"
     (is (= {:type :backroom/bad-options :errors {:workerz ["disallowed key"]}}
-           (find-refusal #(backroom/start-workers! nil (assoc settings :wire wire :log log :kinds [] :schedules [] :workerz 3))))))
+           (find-refusal #(backroom/start-workers! nil (with-new-meter (assoc settings :kinds [] :schedules [] :workerz 3)))))))
   (testing "a kind writes out every key"
     (is (= {:type :backroom/bad-kind :errors {:attempts ["missing required key"]}}
            (find-refusal #(backroom/add-background-job-to-queue! nil (dissoc send-invoice-email :attempts) {:order/id 1} now)))))
   (testing "add-background-job-to-queue! says :run-in-ms and :key"
     (is (= {:type :backroom/bad-options :errors {:key ["missing required key"]}}
-           (find-refusal #(backroom/add-background-job-to-queue! nil send-invoice-email {:order/id 1} {:wire wire :run-in-ms 0})))))
+           (find-refusal #(backroom/add-background-job-to-queue! nil send-invoice-email {:order/id 1} (dissoc now :key))))))
   (testing "backroom makes no wire and no log: start-workers! takes the app's both"
-    (is (= {:type :backroom/bad-options :errors {:wire ["missing required key"] :log ["missing required key"]}}
+    (is (= {:type :backroom/bad-options :errors {:wire ["missing required key"] :log ["missing required key"]
+                                                 :meter ["missing required key"]}}
            (find-refusal #(backroom/start-workers! nil (assoc settings :kinds [] :schedules [])))))
     (is (= :logbook/not-a-log
-           (:type (ex-data (try (backroom/start-workers! nil (assoc settings :wire wire :log (fn [_ _ _]) :kinds [] :schedules []))
+           (:type (ex-data (try (backroom/start-workers! nil (assoc settings :wire wire :log (fn [_ _ _]) :meter (make-meter)
+                                                                    :kinds [] :schedules []))
                                 (catch clojure.lang.ExceptionInfo e e)))))
         "a log logbook didn't make can't carry a background job's context: refused at the start"))
-  (testing "add-background-job-to-queue! takes the app's wire"
-    (is (= {:type :backroom/bad-options :errors {:wire ["missing required key"]}}
-           (find-refusal #(backroom/add-background-job-to-queue! nil send-invoice-email {:order/id 1} {:run-in-ms 0 :key nil}))))))
+  (testing "add-background-job-to-queue! takes the app's wire and meter"
+    (is (= {:type :backroom/bad-options :errors {:wire ["missing required key"] :meter ["missing required key"]}}
+           (find-refusal #(backroom/add-background-job-to-queue! nil send-invoice-email {:order/id 1} {:run-in-ms 0 :key nil})))))
+  (testing "the meter is the app's: one meter didn't make is refused at the start"
+    (is (= {:type :backroom/bad-options :errors {:meter ["should be the app's meter, made by meter.api/make-meter"]}}
+           (find-refusal #(backroom/start-workers! nil (assoc (with-new-meter (assoc settings :kinds [] :schedules [])) :meter nil)))))
+    (is (= {:type :meter/not-a-meter}
+           (find-refusal #(backroom/start-workers! nil (assoc (with-new-meter (assoc settings :kinds [] :schedules [])) :meter {}))))))
+  (testing "the run time's buckets are a setting; meter checks they go up"
+    (is (= {:type :meter/bad-metrics}
+           (select-keys (find-refusal #(backroom/start-workers! nil (with-new-meter (assoc settings :kinds [] :schedules []
+                                                                                          :metric-buckets {:job-run-seconds [2 1]}))))
+                        [:type])))))
 
 (def ^:private runs (atom 0))
 
@@ -197,7 +229,7 @@
         (make-tables-afresh! pool)
         (reset! runs 0)
         (testing "a failure runs again after :retry-first-wait-ms"
-          (let [workers (backroom/start-workers! pool (assoc settings :wire wire :log log :retry-first-wait-ms 100 :kinds [fails-once] :schedules []))]
+          (let [workers (backroom/start-workers! pool (with-new-meter (assoc settings :retry-first-wait-ms 100 :kinds [fails-once] :schedules [])))]
             (try
               (backroom/add-background-job-to-queue! pool fails-once {} now)
               (wait-until #(= 1 (:n (cellar/find-one-row pool count-done {}))))
@@ -210,14 +242,14 @@
               (finally (backroom/stop-workers! workers)))))
         (testing "done background jobs older than :forget-done-after-ms are forgotten when the workers start"
           (reset! lines [])
-          (backroom/stop-workers! (backroom/start-workers! pool (assoc settings :wire wire :log log :forget-done-after-ms 0 :kinds [] :schedules [])))
+          (backroom/stop-workers! (backroom/start-workers! pool (with-new-meter (assoc settings :forget-done-after-ms 0 :kinds [] :schedules []))))
           (is (= 0 (:n (cellar/find-one-row pool count-done {}))))
           (is (= [["info" {"background-job/forgotten" 1 "background-job/forget-done-after-ms" 0}]]
                  (mapv #(vector (get % "level") (get % "data")) (find-lines "backroom/forgot-done")))
               "each round is a line, info when it forgot any"))
         (testing "and every :forget-done-every-ms while they run"
-          (let [workers (backroom/start-workers! pool (assoc settings :wire wire :log log :forget-done-after-ms 0 :forget-done-every-ms 100
-                                                             :kinds [] :schedules []))]
+          (let [workers (backroom/start-workers! pool (with-new-meter (assoc settings :forget-done-after-ms 0 :forget-done-every-ms 100
+                                                             :kinds [] :schedules [])))]
             (try
               (insert-done-background-jobs! pool 3)
               (is (= 3 (:n (cellar/find-one-row pool count-done {}))))
@@ -228,7 +260,7 @@
           (run-sql! pool (str "INSERT INTO backroom.background_jobs (background_job__kind, background_job__params, background_job__state,"
                               " background_job__max_attempts, background_job__timeout_ms, background_job__locked_at)"
                               " VALUES ('test/fails-once', '{}', 'running', 3, 1000, now() - interval '2 seconds')"))
-          (let [workers (backroom/start-workers! pool (assoc settings :wire wire :log log :stuck-after-time-limit-ms 0 :kinds [fails-once] :schedules []))]
+          (let [workers (backroom/start-workers! pool (with-new-meter (assoc settings :stuck-after-time-limit-ms 0 :kinds [fails-once] :schedules [])))]
             (try
               (wait-until #(= 1 (:n (cellar/find-one-row pool count-done {}))))
               (is (= 1 (:n (cellar/find-one-row pool count-done {}))))
@@ -244,8 +276,8 @@
         (insert-done-background-jobs! (first pools) 5000)
         (reset! lines [])
         (testing "three servers forgetting every 10 ms skip each other's rows: each row is deleted once, and none fails"
-          (let [servers (mapv #(backroom/start-workers! % (assoc settings :wire wire :log log :forget-done-after-ms 0 :forget-done-every-ms 10
-                                                                 :kinds [] :schedules []))
+          (let [servers (mapv #(backroom/start-workers! % (with-new-meter (assoc settings :forget-done-after-ms 0 :forget-done-every-ms 10
+                                                                 :kinds [] :schedules [])))
                               pools)]
             (try
               (wait-until #(= 0 (:n (cellar/find-one-row (first pools) count-done {}))))
@@ -254,3 +286,90 @@
           (is (= 5000 (reduce + (map #(get-in % ["data" "background-job/forgotten"]) (find-lines "backroom/forgot-done")))))
           (is (= [] (find-lines "backroom/forgetting-failed"))))
         (finally (run! cellar/stop-pool! pools))))))
+
+(defn- find-metric-lines [a-meter prefix]
+  (filterv #(str/starts-with? % prefix) (str/split-lines (meter/write-metrics-text a-meter))))
+
+(defn- find-slow-running [a-meter]
+  (filterv #(str/includes? % "slow") (find-metric-lines a-meter "backroom_jobs_running")))
+
+(def ^:private always-fails
+  {:name         :test/always-fails
+   :params-shape [:map]
+   :run          (fn [_ _] (throw (ex-info "never works" {})))
+   :timeout-ms   5000
+   :attempts     2})
+
+(def ^:private slow
+  {:name         :test/slow
+   :params-shape [:map]
+   :run          (fn [_ _] (Thread/sleep 600))
+   :timeout-ms   5000
+   :attempts     1})
+
+(deftest the-workers-count-on-the-apps-meter
+  (if-not port
+    (println "backroom.api-test: skipped, BACKROOM_TEST_PORT is not set")
+    (let [pool  (make-pool (System/getenv "BACKROOM_TEST_USER"))
+          ;; one meter for the app: the pool's metrics and backroom's beside them
+          meter (:cellar/meter pool)
+          now   (assoc now :meter meter)]
+      (try
+        (make-tables-afresh! pool)
+        (reset! emails-sent [])
+        ;; a log of its own: the other tests read the shared one's lines
+        (let [own-log (logbook/log-function (logbook/make-logbook {:lowest-level :debug :format :json :errors-kept 10
+                                                                    :write-to (fn [_])}))
+              workers (backroom/start-workers! pool (assoc settings :wire wire :log own-log :meter meter :retry-first-wait-ms 100
+                                                           :kinds [send-invoice-email give-up always-fails slow] :schedules []))]
+          (try
+            (testing "declared at the start: a metric without labels is there at 0"
+              (is (= ["backroom_dispatcher_failures_total 0"] (find-metric-lines meter "backroom_dispatcher_failures_total"))))
+            (backroom/add-background-job-to-queue! pool send-invoice-email {:order/id 1} now)
+            (backroom/add-background-job-to-queue! pool give-up {} now)
+            (backroom/add-background-job-to-queue! pool always-fails {} now)
+            (testing "a job of a key already queued isn't added, nor counted"
+              (backroom/add-background-job-to-queue! pool send-invoice-email {:order/id 2} (assoc now :run-in-ms 60000 :key "k"))
+              (backroom/add-background-job-to-queue! pool send-invoice-email {:order/id 2} (assoc now :run-in-ms 60000 :key "k")))
+            (testing "a job of a kind this server doesn't run is other"
+              (run-sql! pool (str "INSERT INTO backroom.background_jobs (background_job__kind, background_job__params,"
+                                  " background_job__max_attempts, background_job__timeout_ms)"
+                                  " VALUES ('elsewhere/kind', '{}', 1, 1000)")))
+            (wait-until #(= 2 (count (backroom/list-dead-background-jobs pool 10))))
+            (wait-until #(= 1 (count @emails-sent)))
+            (wait-until #(= 5 (count (find-metric-lines meter "backroom_job_runs_total"))))
+            (testing "each job added, by kind"
+              (is (= ["backroom_jobs_added_total{kind=\"test.mail/send-invoice-email\"} 2"
+                      "backroom_jobs_added_total{kind=\"test/always-fails\"} 1"
+                      "backroom_jobs_added_total{kind=\"test/give-up\"} 1"]
+                     (find-metric-lines meter "backroom_jobs_added_total"))))
+            (testing "each run, by kind and how it ended"
+              (is (= ["backroom_job_runs_total{kind=\"other\",outcome=\"gave-up\"} 1"
+                      "backroom_job_runs_total{kind=\"test.mail/send-invoice-email\",outcome=\"done\"} 1"
+                      "backroom_job_runs_total{kind=\"test/always-fails\",outcome=\"failed\"} 1"
+                      "backroom_job_runs_total{kind=\"test/always-fails\",outcome=\"gave-up\"} 1"
+                      "backroom_job_runs_total{kind=\"test/give-up\",outcome=\"gave-up\"} 1"]
+                     (find-metric-lines meter "backroom_job_runs_total"))))
+            (testing "each run's time, by kind"
+              (is (= ["backroom_job_run_seconds_count{kind=\"other\"} 1"
+                      "backroom_job_run_seconds_count{kind=\"test.mail/send-invoice-email\"} 1"
+                      "backroom_job_run_seconds_count{kind=\"test/always-fails\"} 2"
+                      "backroom_job_run_seconds_count{kind=\"test/give-up\"} 1"]
+                     (find-metric-lines meter "backroom_job_run_seconds_count"))))
+            (testing "the jobs running now, by kind"
+              (backroom/add-background-job-to-queue! pool slow {} now)
+              (wait-until #(= ["backroom_jobs_running{kind=\"test/slow\"} 1"]
+                              (find-slow-running meter)))
+              (is (= ["backroom_jobs_running{kind=\"test/slow\"} 1"]
+                     (find-slow-running meter)))
+              (wait-until #(= ["backroom_jobs_running{kind=\"test/slow\"} 0"]
+                              (find-slow-running meter)))
+              (is (= ["backroom_jobs_running{kind=\"test/slow\"} 0"]
+                     (find-slow-running meter)))
+              (is (= ["backroom_job_run_seconds_bucket{kind=\"test/slow\",le=\"0.1\"} 0"
+                      "backroom_job_run_seconds_bucket{kind=\"test/slow\",le=\"1.0\"} 1"]
+                     (filterv #(re-find #"le=\"(0\.1|1\.0)\"" %) (find-metric-lines meter "backroom_job_run_seconds_bucket{kind=\"test/slow\"")))
+                  "in the settings' buckets"))
+            (finally (backroom/stop-workers! workers))))
+        (finally (cellar/stop-pool! pool))))))
+

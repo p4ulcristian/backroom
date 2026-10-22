@@ -1,5 +1,7 @@
 # The app passes its log; backroom never decides how a line is written
 
+> **Changed in part** by [Background jobs are counted on the app's meter](2026-10-23-jobs-are-counted-on-the-apps-meter.md) (2026-10-23, v0.5.0): `start-workers!` and `add-background-job-to-queue!` also take `:meter`, the app's meter.
+
 > **Changed in part** by [Done background jobs are forgotten while the workers run](2026-10-23-done-background-jobs-are-forgotten-while-the-workers-run.md) (2026-10-23, v0.4.0): the workers' log also gets `:backroom/forgot-done` and `:backroom/forgetting-failed`.
 
 > Changes in part [Every value that sets behaviour is a setting](2026-10-22-every-value-that-sets-behaviour-is-a-setting.md) (one log, `System.Logger` `backroom`). Since v0.3.0, on cellar v0.2.0 and logbook v0.1.0.

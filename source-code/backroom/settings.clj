@@ -21,7 +21,9 @@
    [:stuck-after-time-limit-ms [:int {:min 0}]]
    [:forget-done-after-ms [:int {:min 0}]]
    [:forget-done-every-ms [:int {:min 1}]]
-   [:stop-wait-ms [:int {:min 0}]]])
+   [:stop-wait-ms [:int {:min 0}]]
+   [:metric-buckets [:map {:closed true}
+                     [:job-run-seconds [:vector {:min 1} number?]]]]])
 
 (def settings-shape
   "The part of an app's settings that is backroom's, every key required.
@@ -39,7 +41,10 @@
    when the workers start and every :forget-done-every-ms while they run.
    :forget-done-every-ms: how often the workers delete them.
    :stop-wait-ms: how long stop-workers! waits for the running background
-   jobs to finish."
+   jobs to finish.
+   :metric-buckets: the upper bounds of backroom's histogram, in seconds,
+   ascending (meter checks them): {:job-run-seconds […]}, how long a run
+   takes. No default: what a job takes is the app's to say."
   (into [:map {:closed true}] settings-entries))
 
 (def kind-shape
@@ -76,12 +81,20 @@
    its background job's id and kind as context."
   [:log [fn? {:error/message "should be the app's log function, made by logbook"}]])
 
+(def meter-entry
+  "The app's meter, made by meter's make-meter: start-workers! declares
+   backroom's metrics on it, and the workers and add-background-job-to-queue!
+   count into it. A value make-meter didn't make is refused by meter
+   (:meter/not-a-meter)."
+  [:meter [some? {:error/message "should be the app's meter, made by meter.api/make-meter"}]])
+
 (def workers-options-shape
-  "start-workers!'s options: the app's wire and log, the settings, the
-   kinds this server runs and the schedules, every key required."
+  "start-workers!'s options: the app's wire, log and meter, the settings,
+   the kinds this server runs and the schedules, every key required."
   (into [:map {:closed true}
          wire-entry
          log-entry
+         meter-entry
          [:kinds [:sequential kind-shape]]
          [:schedules [:sequential schedule-shape]]]
         settings-entries))
@@ -89,11 +102,13 @@
 (def queue-options-shape
   "add-background-job-to-queue!'s options, every key required.
    :wire: the app's wire, which the params are kept by.
+   :meter: the app's meter, which the job added is counted on.
    :run-in-ms: run no sooner than this, 0 for now.
    :key: nil, or text: one background job of this key for as long as it is
    remembered; a second one queues nothing and returns the first one's id."
   [:map {:closed true}
    wire-entry
+   meter-entry
    [:run-in-ms [:int {:min 0}]]
    [:key [:maybe :string]]])
 

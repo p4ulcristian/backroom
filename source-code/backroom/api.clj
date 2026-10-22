@@ -10,17 +10,19 @@
         :timeout-ms   60000
         :attempts     5})
 
-     ;; the app's wire and log, made once by the app (backroom makes neither)
+     ;; the app's wire, log and meter, made once by the app (backroom makes none)
      (def wire (wire.api/make-wire-from-settings wire-settings))
      (def log (logbook.api/log-function (logbook.api/make-logbook logbook-settings)))
+     (def meter (meter.api/make-meter meter-settings {:log log}))
 
      ;; in a request's transaction: the background job exists only if that commits
      (backroom/add-background-job-to-queue! transaction send-invoice-email {:order/id 42}
-                                            {:wire wire :run-in-ms 0 :key nil})
+                                            {:wire wire :meter meter :run-in-ms 0 :key nil})
 
      ;; on each server that runs background jobs
      (backroom/start-workers! pool {:wire                      wire
                                     :log                       log
+                                    :meter                     meter
                                     :kinds                     [send-invoice-email]
                                     :schedules                 [{:kind send-nightly-report :params {} :cron \"0 1 * * *\"}]
                                     :workers                   4
@@ -31,7 +33,8 @@
                                     :stuck-after-time-limit-ms 60000
                                     :forget-done-after-ms      604800000
                                     :forget-done-every-ms      3600000
-                                    :stop-wait-ms              30000})
+                                    :stop-wait-ms              30000
+                                    :metric-buckets            {:job-run-seconds [0.01 0.1 1 10 60 600]}})
 
    A background job is a row in backroom.background_jobs; its tables are maps
    (background-jobs-tables) the app passes to cellar with its own. Every :poll-ms the workers look for
@@ -60,10 +63,18 @@
    the background job (its last attempt, or a give-up) :error
    :backroom/gave-up, both with the exception or the time limit; each
    round of forgetting :backroom/forgot-done (:info when it deleted any,
-   :debug when none), or :warn :backroom/forgetting-failed."
+   :debug when none), or :warn :backroom/forgetting-failed.
+
+   start-workers! declares backroom's metrics on the app's meter, :meter
+   (backroom.metrics): backroom_jobs_added_total{kind},
+   backroom_job_runs_total{kind,outcome}, backroom_job_run_seconds{kind},
+   backroom_jobs_running{kind}, backroom_dispatcher_failures_total; the
+   kinds' set is its :kinds. add-background-job-to-queue! takes the meter
+   too, and counts the job it adds."
   (:require
    [clojure.string :as str]
    [backroom.cron :as cron]
+   [backroom.metrics :as metrics]
    [backroom.settings :as settings]
    [cellar.api :as cellar]
    [logbook.api :as logbook]
@@ -155,22 +166,26 @@
   "Saves a background job of a kind, on a pool or in a transaction (then it
    exists only if that commits). Its params must fit the kind's
    :params-shape. Options, every key required: :wire, the app's wire,
-   which the params are kept by; :run-in-ms, run no sooner
-   (0 for now); :key, nil, or one background job of this key for as long
-   as it is remembered: a second one queues nothing and returns the first
-   one's id. Returns the background job's id."
+   which the params are kept by; :meter, the app's meter, which the job
+   added is counted on (backroom_jobs_added_total, declared by
+   start-workers!); :run-in-ms, run no sooner (0 for now); :key, nil, or
+   one background job of this key for as long as it is remembered: a
+   second one queues nothing, isn't counted, and returns the first one's
+   id. Returns the background job's id."
   [pool-or-transaction kind params options]
   (settings/check-kind kind)
   (settings/check-queue-options options)
   (let [{:keys [name params-shape timeout-ms attempts]} kind
-        {:keys [wire run-in-ms key]}                    options]
-    (:background-job/id (cellar/find-one-row pool-or-transaction insert-background-job
-                                             {:background-job/kind         (turn-kind-name-into-text name)
-                                              :background-job/params       (turn-params-into-json-text wire name params-shape params)
-                                              :background-job/run-at       (turn-instant-into-utc (.plusMillis (Instant/now) (long run-in-ms)))
-                                              :background-job/max-attempts attempts
-                                              :background-job/timeout-ms   timeout-ms
-                                              :background-job/key          key}))))
+        {:keys [wire meter run-in-ms key]}              options
+        {:keys [added] :as row} (cellar/find-one-row pool-or-transaction insert-background-job
+                                                     {:background-job/kind         (turn-kind-name-into-text name)
+                                                      :background-job/params       (turn-params-into-json-text wire name params-shape params)
+                                                      :background-job/run-at       (turn-instant-into-utc (.plusMillis (Instant/now) (long run-in-ms)))
+                                                      :background-job/max-attempts attempts
+                                                      :background-job/timeout-ms   timeout-ms
+                                                      :background-job/key          key})]
+    (when added (metrics/count-added! meter name))
+    (:background-job/id row)))
 
 (defn make-give-up-exception
   "The exception a background job's :run throws to end the background job
@@ -225,14 +240,18 @@
 
 (defn- run-claimed-background-job!
   "Runs a claimed background job within its time limit and saves what
-   happened; log is the background job's."
-  [{:keys [wire pool kinds-by-name] :as running} log {:background-job/keys [id attempts timeout-ms] :as background-job}]
+   happened; log is the background job's. Records the run's time; returns
+   how it ended: :done, :failed or :gave-up (backroom.metrics/outcomes)."
+  [{:keys [wire pool kinds-by-name meter] :as running} log {:background-job/keys [id kind attempts timeout-ms] :as background-job}]
   (let [outcome (promise)
+        started (System/nanoTime)
         thread  (Thread/startVirtualThread #(deliver outcome (run-background-job-and-catch wire pool kinds-by-name log background-job)))
         result  (deref outcome timeout-ms :timed-out)]
+    (metrics/record-run-time! meter kind started)
     (when (= :timed-out result) (.interrupt thread))
     (if (= :ok result)
-      (cellar/run-statement! pool update-background-job-to-done {:background-job/id id})
+      (do (cellar/run-statement! pool update-background-job-to-done {:background-job/id id})
+          :done)
       (let [retry-ms (find-wait-before-retry-ms running attempts)
             state    (:background-job/state
                       (cellar/find-one-row pool update-background-job-to-failed
@@ -242,7 +261,8 @@
                                             :background-job/last-error (if (= :timed-out result)
                                                                          (str "Ran longer than " timeout-ms " ms")
                                                                          (str (.getName (class result)) ": " (ex-message result)))}))]
-        (log-failure! log state attempts retry-ms result)))))
+        (log-failure! log state attempts retry-ms result)
+        (if (= "dead" state) :gave-up :failed)))))
 
 ;; -----------------------------------------------------------------------------
 ;; The workers
@@ -254,13 +274,13 @@
 (defn- add-due-scheduled-background-jobs!
   "Queues the background job of every due schedule this server claims, and moves the
    schedule to its next time."
-  [wire pool schedules-by-key]
+  [wire meter pool schedules-by-key]
   (cellar/run-in-transaction! pool {:read-only? false}
     (fn [transaction]
       (doseq [{key :background-job-schedule/key} (cellar/find-rows transaction find-due-schedules {})
               :let [{:keys [kind params cron]} (get schedules-by-key key)]
               :when kind]
-        (add-background-job-to-queue! transaction kind params {:wire wire :run-in-ms 0 :key nil})
+        (add-background-job-to-queue! transaction kind params {:wire wire :meter meter :run-in-ms 0 :key nil})
         (cellar/run-statement! transaction update-schedule
                                {:background-job-schedule/key     key
                                 :background-job-schedule/next-at (turn-instant-into-utc
@@ -270,11 +290,11 @@
   "Until stopped: queue due schedules, queue stuck background jobs again, and give
    every free worker a due background job; then wait :poll-ms, or less when a worker
    finishes or the workers stop."
-  [{:keys [wire log pool stopped ^Semaphore free-workers ^ArrayBlockingQueue wake schedules-by-key poll-ms stuck-after-time-limit-ms]
+  [{:keys [wire log meter pool stopped ^Semaphore free-workers ^ArrayBlockingQueue wake schedules-by-key poll-ms stuck-after-time-limit-ms]
     :as   running}]
   (while (not @stopped)
     (try
-      (add-due-scheduled-background-jobs! wire pool schedules-by-key)
+      (add-due-scheduled-background-jobs! wire meter pool schedules-by-key)
       (cellar/run-statement! pool update-stuck-background-jobs {:background-job/stuck-after-time-limit-ms stuck-after-time-limit-ms})
       (loop []
         (when (and (not @stopped) (.tryAcquire free-workers))
@@ -282,18 +302,23 @@
                                           (update :background-job/kind keyword))]
             (do (Thread/startVirtualThread
                  (fn []
-                   (let [job-log (logbook/with-context log {:background-job/id   (:background-job/id background-job)
-                                                            :background-job/kind (:background-job/kind background-job)})]
-                     (try (run-claimed-background-job! running job-log background-job)
+                   (let [kind    (:background-job/kind background-job)
+                         job-log (logbook/with-context log {:background-job/id   (:background-job/id background-job)
+                                                            :background-job/kind kind})]
+                     (metrics/add-to-running! meter kind 1)
+                     (try (metrics/count-run! meter kind (run-claimed-background-job! running job-log background-job))
                           (catch Throwable e
+                            (metrics/count-run! meter kind :outcome-not-saved)
                             (job-log :error :backroom/outcome-not-saved {:error e}))
                           (finally
+                            (metrics/add-to-running! meter kind -1)
                             (.release free-workers)
                             (.offer wake :worker-free))))))
                 (recur))
             (.release free-workers))))
       (catch Throwable e
         (when-not @stopped
+          (metrics/count-dispatcher-failure! meter)
           (log :warn :backroom/dispatcher-failed {:error e}))))
     (.poll wake (long poll-ms) TimeUnit/MILLISECONDS)))
 
@@ -322,29 +347,33 @@
      :wire      the app's wire           every background job's params are read by it
      :log       the app's log            what goes wrong is written to it; each run gets
                                          one with its background job's id and kind
+     :meter     the app's meter          backroom's metrics are declared on it and counted
+                                         into (backroom.metrics), the kinds as their set
      :kinds     [background job kinds]   every kind this server runs
      :schedules [{:kind a-background-job-kind :params {…} :cron \"0 1 * * *\"}]
      and the settings (settings-shape): :workers :poll-ms
      :retry-first-wait-ms :retry-wait-factor :retry-max-wait-ms
      :stuck-after-time-limit-ms :forget-done-after-ms :forget-done-every-ms
-     :stop-wait-ms
+     :stop-wait-ms :metric-buckets
 
    Forgets done background jobs older than :forget-done-after-ms now, and
    every :forget-done-every-ms while the workers run. Returns the running
    workers."
   [pool options]
   (settings/check-workers-options options)
-  (let [{:keys [wire log kinds schedules workers]} options
+  (let [{:keys [wire log meter kinds schedules workers]} options
         names (map :name kinds)]
     ;; a log logbook didn't make can't carry a job's context: refused now, not at the first run
     (logbook/with-context log {})
     (when (not= (count names) (count (set names)))
       (throw (ex-info (str "Background job kinds named twice: " (str/join " " names))
                       {:type :backroom/kind-named-twice})))
+    ;; and a meter meter didn't make is refused here too (:meter/not-a-meter)
+    (metrics/declare-metrics! meter options)
     (doseq [{:keys [cron]} schedules]
       (cron/turn-cron-line-into-allowed-values cron))
     (let [schedules-by-key (into {} (map (juxt #(make-schedule-key wire %) identity)) schedules)
-          running          (merge (select-keys options [:wire :log :workers :poll-ms :retry-first-wait-ms :retry-wait-factor
+          running          (merge (select-keys options [:wire :log :meter :workers :poll-ms :retry-first-wait-ms :retry-wait-factor
                                                         :retry-max-wait-ms :stuck-after-time-limit-ms :forget-done-after-ms
                                                         :forget-done-every-ms :stop-wait-ms])
                                   {:pool             pool
