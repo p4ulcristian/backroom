@@ -2,9 +2,14 @@
   "backroom's settings, and the data its functions take, as malli shapes,
    checked before anything runs. Nothing has a default: every key is
    written out (nil where it is a choice), and a missing or unknown one
-   refuses, named, with every other problem at once."
+   refuses, named, with every other problem at once. They are checked by
+   malli itself, not through wire: they are values the app hands in, not
+   data crossing an edge. The functions that keep or read a background
+   job's params take the app's wire under :wire in their options; backroom
+   never makes one."
   (:require
-   [wire.api :as wire]))
+   [malli.core :as malli]
+   [malli.error :as malli-error]))
 
 (def ^:private settings-entries
   [[:workers [:int {:min 1}]]
@@ -53,20 +58,29 @@
    [:params :any]
    [:cron :string]])
 
+(def wire-entry
+  "The app's wire (wire.api's make-wire-from-settings), made once by the
+   app: a background job's params go into the queue as JSON text by it and
+   come out by it."
+  [:wire [some? {:error/message "should be the app's wire, made by wire.api/make-wire-from-settings"}]])
+
 (def workers-options-shape
-  "start-workers!'s options: the settings, the kinds this server runs and
-   the schedules, every key required."
+  "start-workers!'s options: the app's wire, the settings, the kinds this
+   server runs and the schedules, every key required."
   (into [:map {:closed true}
+         wire-entry
          [:kinds [:sequential kind-shape]]
          [:schedules [:sequential schedule-shape]]]
         settings-entries))
 
 (def queue-options-shape
   "add-background-job-to-queue!'s options, every key required.
+   :wire: the app's wire, which the params are kept by.
    :run-in-ms: run no sooner than this, 0 for now.
    :key: nil, or text: one background job of this key for as long as it is
    remembered; a second one queues nothing and returns the first one's id."
   [:map {:closed true}
+   wire-entry
    [:run-in-ms [:int {:min 0}]]
    [:key [:maybe :string]]])
 
@@ -74,9 +88,10 @@
   "Returns the data; throws {:type kind :errors …} with every problem at
    once when it doesn't fit the shape."
   [what kind shape data]
-  (when-let [errors (wire/find-errors-in-data-for-shape shape data)]
-    (throw (ex-info (str what " have problems: " (pr-str errors))
-                    {:type kind :errors errors})))
+  (when-let [explanation (malli/explain shape data)]
+    (let [errors (malli-error/humanize explanation)]
+      (throw (ex-info (str what " have problems: " (pr-str errors))
+                      {:type kind :errors errors}))))
   data)
 
 (defn check-workers-options [options]

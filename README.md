@@ -18,20 +18,33 @@ as maps) and [wire](https://github.com/p4ulcristian/wire) (params kept with
 their types). One public namespace, `backroom.api`; its part is
 `backroom.cron`.
 
+The app makes its wire once and hands it in: `add-background-job-to-queue!`
+and `start-workers!` take it under `:wire` in their options. backroom never
+makes a wire.
+
 ## The api
 
 | function | does |
 |---|---|
 | `background-jobs-tables` `background-jobs-table` `background-job-schedules-table` | its two tables, `backroom.background_jobs` and `backroom.background_job_schedules`, as maps for cellar |
-| `add-background-job-to-queue!` | saves a background job of a kind, its params checked by the kind's `:params-shape`; options `:run-in-ms` and `:key` (nil, or one at a time), both written out |
+| `add-background-job-to-queue!` | saves a background job of a kind, its params checked by the kind's `:params-shape`; options `:wire` (the app's), `:run-in-ms` and `:key` (nil, or one at a time), all written out |
 | `make-give-up-exception` | what a kind's `:run` throws to end its background job for good: dead at once, kept with the message |
-| `start-workers!` `stop-workers!` `settings-shape` | the workers on this server (`:kinds` `:schedules` and the settings); stopping waits for running ones, at most `:stop-wait-ms`; the settings as a malli shape |
+| `start-workers!` `stop-workers!` `settings-shape` | the workers on this server (`:wire` `:kinds` `:schedules` and the settings); stopping waits for running ones, at most `:stop-wait-ms`; the settings as a malli shape |
 | `list-queued-background-jobs` `list-dead-background-jobs` | what waits, and what had all its attempts or gave up, with its last error |
 | `run-background-job-again-now!` | queues a dead or waiting background job to run now, its attempts counted afresh |
 
 ```clojure
 (require '[backroom.api :as backroom]
-         '[cellar.api :as cellar])
+         '[cellar.api :as cellar]
+         '[wire.api :as wire])
+
+;; the app's wire, made once (wire's settings, every key written out)
+(def wire
+  (wire/make-wire-from-settings
+   {:most-shapes-kept 1000
+    :json-limits      {:max-nesting-depth 1000 :max-number-length 1000 :max-string-length 20000000
+                       :max-name-length 50000 :max-document-length nil :max-token-count nil
+                       :max-writing-nesting-depth 1000}}))
 
 (def send-invoice-email
   {:name         :billing/send-invoice-email
@@ -45,7 +58,8 @@ their types). One public namespace, `backroom.api`; its part is
 
 (cellar/migrate! pool (into app-tables backroom/background-jobs-tables) changes migrate-options) ; cellar's migrate! options
 
-(def workers (backroom/start-workers! pool {:kinds                     [send-invoice-email send-nightly-report]
+(def workers (backroom/start-workers! pool {:wire                      wire
+                                            :kinds                     [send-invoice-email send-nightly-report]
                                             :schedules                 [{:kind send-nightly-report :params {} :cron "0 1 * * *"}]
                                             :workers                   4
                                             :poll-ms                   1000        ; how often to look for due ones
@@ -57,7 +71,7 @@ their types). One public namespace, `backroom.api`; its part is
                                             :stop-wait-ms              30000}))    ; stop-workers! waits this long for running ones
 
 ;; in the transaction that marks the order paid: no email for an order that wasn't
-(backroom/add-background-job-to-queue! transaction send-invoice-email {:order/id order-id} {:run-in-ms 0 :key nil})
+(backroom/add-background-job-to-queue! transaction send-invoice-email {:order/id order-id} {:wire wire :run-in-ms 0 :key nil})
 
 ;; the order was deleted: no retry helps
 (throw (backroom/make-give-up-exception "The order was deleted" {:order/id order-id}))

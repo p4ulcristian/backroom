@@ -5,6 +5,7 @@
   (:require
    [clojure.test :refer [deftest is testing]]
    [backroom.api :as backroom]
+   [backroom.test-wire :refer [wire]]
    [cellar.api :as cellar]))
 
 (def ^:private port (some-> (System/getenv "BACKROOM_TEST_PORT") parse-long))
@@ -30,7 +31,7 @@
    :forget-done-after-ms      604800000
    :stop-wait-ms              5000})
 
-(def ^:private now {:run-in-ms 0 :key nil})
+(def ^:private now {:wire wire :run-in-ms 0 :key nil})
 
 (defn- run-sql! [pool text]
   (cellar/run-statement! pool (cellar/make-query-from-sql-text "test" text) {}))
@@ -70,7 +71,7 @@
       (try
         (make-tables-afresh! pool)
         (reset! emails-sent [])
-        (let [workers (backroom/start-workers! pool (assoc settings :kinds [send-invoice-email give-up] :schedules []))]
+        (let [workers (backroom/start-workers! pool (assoc settings :wire wire :kinds [send-invoice-email give-up] :schedules []))]
           (try
             (testing "a queued background job runs, with its params as shaped data"
               (backroom/add-background-job-to-queue! pool send-invoice-email {:order/id 42} now)
@@ -85,8 +86,8 @@
                 (is (= "clojure.lang.ExceptionInfo: The order is gone"
                        (:background-job/last-error (first (filter #(= id (:background-job/id %)) (backroom/list-dead-background-jobs pool 10))))))))
             (testing "one background job per key"
-              (is (= (backroom/add-background-job-to-queue! pool send-invoice-email {:order/id 1} {:run-in-ms 60000 :key "k"})
-                     (backroom/add-background-job-to-queue! pool send-invoice-email {:order/id 1} {:run-in-ms 60000 :key "k"}))))
+              (is (= (backroom/add-background-job-to-queue! pool send-invoice-email {:order/id 1} {:wire wire :run-in-ms 60000 :key "k"})
+                     (backroom/add-background-job-to-queue! pool send-invoice-email {:order/id 1} {:wire wire :run-in-ms 60000 :key "k"}))))
             (finally (is (backroom/stop-workers! workers) "every running background job had finished"))))
         (finally (cellar/stop-pool! pool))))))
 
@@ -101,7 +102,7 @@
         (cellar/grant-tables-to-role! owner-pool backroom/background-jobs-tables "backroom_app")
         (let [app-pool (make-pool "backroom_app")]
           (try
-            (let [workers (backroom/start-workers! app-pool (assoc settings :workers 1 :kinds [send-invoice-email] :schedules []))]
+            (let [workers (backroom/start-workers! app-pool (assoc settings :wire wire :workers 1 :kinds [send-invoice-email] :schedules []))]
               (try
                 (testing "the app's role, granted backroom's tables by cellar, queues a background job and a worker claims and runs it"
                   (backroom/add-background-job-to-queue! app-pool send-invoice-email {:order/id 7} now)
@@ -118,20 +119,25 @@
 
 (deftest every-setting-and-option-is-required
   (testing "start-workers! names each missing setting, before anything runs"
-    (let [{:keys [type errors]} (find-refusal #(backroom/start-workers! nil {:kinds [] :schedules [] :workers 1 :poll-ms 100}))]
+    (let [{:keys [type errors]} (find-refusal #(backroom/start-workers! nil {:wire wire :kinds [] :schedules [] :workers 1 :poll-ms 100}))]
       (is (= :backroom/bad-options type))
       (is (= #{:retry-first-wait-ms :retry-wait-factor :retry-max-wait-ms :stuck-after-time-limit-ms
                :forget-done-after-ms :stop-wait-ms}
              (set (keys errors))))))
   (testing "and an unknown one"
     (is (= {:type :backroom/bad-options :errors {:workerz ["disallowed key"]}}
-           (find-refusal #(backroom/start-workers! nil (assoc settings :kinds [] :schedules [] :workerz 3))))))
+           (find-refusal #(backroom/start-workers! nil (assoc settings :wire wire :kinds [] :schedules [] :workerz 3))))))
   (testing "a kind writes out every key"
     (is (= {:type :backroom/bad-kind :errors {:attempts ["missing required key"]}}
            (find-refusal #(backroom/add-background-job-to-queue! nil (dissoc send-invoice-email :attempts) {:order/id 1} now)))))
   (testing "add-background-job-to-queue! says :run-in-ms and :key"
     (is (= {:type :backroom/bad-options :errors {:key ["missing required key"]}}
-           (find-refusal #(backroom/add-background-job-to-queue! nil send-invoice-email {:order/id 1} {:run-in-ms 0}))))))
+           (find-refusal #(backroom/add-background-job-to-queue! nil send-invoice-email {:order/id 1} {:wire wire :run-in-ms 0})))))
+  (testing "backroom makes no wire: start-workers! and add-background-job-to-queue! take the app's"
+    (is (= {:type :backroom/bad-options :errors {:wire ["missing required key"]}}
+           (find-refusal #(backroom/start-workers! nil (assoc settings :kinds [] :schedules [])))))
+    (is (= {:type :backroom/bad-options :errors {:wire ["missing required key"]}}
+           (find-refusal #(backroom/add-background-job-to-queue! nil send-invoice-email {:order/id 1} {:run-in-ms 0 :key nil}))))))
 
 (def ^:private runs (atom 0))
 
@@ -153,20 +159,20 @@
         (make-tables-afresh! pool)
         (reset! runs 0)
         (testing "a failure runs again after :retry-first-wait-ms"
-          (let [workers (backroom/start-workers! pool (assoc settings :retry-first-wait-ms 100 :kinds [fails-once] :schedules []))]
+          (let [workers (backroom/start-workers! pool (assoc settings :wire wire :retry-first-wait-ms 100 :kinds [fails-once] :schedules []))]
             (try
               (backroom/add-background-job-to-queue! pool fails-once {} now)
               (wait-until #(= 1 (:n (cellar/find-one-row pool count-done {}))))
               (is (= 2 @runs))
               (finally (backroom/stop-workers! workers)))))
         (testing "done background jobs older than :forget-done-after-ms are forgotten when the workers start"
-          (backroom/stop-workers! (backroom/start-workers! pool (assoc settings :forget-done-after-ms 0 :kinds [] :schedules [])))
+          (backroom/stop-workers! (backroom/start-workers! pool (assoc settings :wire wire :forget-done-after-ms 0 :kinds [] :schedules [])))
           (is (= 0 (:n (cellar/find-one-row pool count-done {})))))
         (testing "a background job left running is queued again past its time limit and :stuck-after-time-limit-ms"
           (run-sql! pool (str "INSERT INTO backroom.background_jobs (background_job__kind, background_job__params, background_job__state,"
                               " background_job__max_attempts, background_job__timeout_ms, background_job__locked_at)"
                               " VALUES ('test/fails-once', '{}', 'running', 3, 1000, now() - interval '2 seconds')"))
-          (let [workers (backroom/start-workers! pool (assoc settings :stuck-after-time-limit-ms 0 :kinds [fails-once] :schedules []))]
+          (let [workers (backroom/start-workers! pool (assoc settings :wire wire :stuck-after-time-limit-ms 0 :kinds [fails-once] :schedules []))]
             (try
               (wait-until #(= 1 (:n (cellar/find-one-row pool count-done {}))))
               (is (= 1 (:n (cellar/find-one-row pool count-done {}))))
