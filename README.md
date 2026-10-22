@@ -26,7 +26,9 @@ makes a wire. So with the log: `start-workers!` takes the app's
 `{:background-job/id … :background-job/kind …}` as its context (its
 context's `:log`), and backroom writes only there: `:backroom/failed`
 (warn, runs again), `:backroom/gave-up` (error, dead),
-`:backroom/outcome-not-saved`, `:backroom/dispatcher-failed`
+`:backroom/outcome-not-saved`, `:backroom/dispatcher-failed`,
+`:backroom/forgot-done` (info with how many, debug for none),
+`:backroom/forgetting-failed`
 ([why](decisions/2026-10-22-the-app-passes-its-log.md)).
 
 ## The api
@@ -81,6 +83,7 @@ context's `:log`), and backroom writes only there: `:backroom/failed`
                                             :retry-max-wait-ms         3600000     ; never more than an hour apart
                                             :stuck-after-time-limit-ms 60000       ; left running by a stopped server: again past its limit and a minute
                                             :forget-done-after-ms      604800000   ; done ones kept a week
+                                            :forget-done-every-ms      3600000     ; and deleted once past that, every hour
                                             :stop-wait-ms              30000}))    ; stop-workers! waits this long for running ones
 
 ;; in the transaction that marks the order paid: no email for an order that wasn't
@@ -100,7 +103,9 @@ A background job can run twice (a server that stops mid-run leaves it
 running; it is queued again once its time limit and
 `:stuck-after-time-limit-ms` have passed), so its work must be safe to
 repeat. Done background jobs older than `:forget-done-after-ms` are deleted
-when the workers start.
+when the workers start and every `:forget-done-every-ms` while they run, on
+every server at once: a row another server is deleting is skipped, not
+waited for ([why](decisions/2026-10-23-done-background-jobs-are-forgotten-while-the-workers-run.md)).
 The app's own Postgres role, which owns nothing, uses the tables once
 `cellar/grant-tables-to-role!` is given them.
 

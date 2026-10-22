@@ -1,5 +1,7 @@
 # The app passes its log; backroom never decides how a line is written
 
+> **Changed in part** by [Done background jobs are forgotten while the workers run](2026-10-23-done-background-jobs-are-forgotten-while-the-workers-run.md) (2026-10-23, v0.4.0): the workers' log also gets `:backroom/forgot-done` and `:backroom/forgetting-failed`.
+
 > Changes in part [Every value that sets behaviour is a setting](2026-10-22-every-value-that-sets-behaviour-is-a-setting.md) (one log, `System.Logger` `backroom`). Since v0.3.0, on cellar v0.2.0 and logbook v0.1.0.
 
 **Decision:** `start-workers!` takes the app's log, `(log level event data)` as logbook makes it, as a required key, `:log`, in its options, checked by malli as a function and then given to logbook's `with-context` once, so a function logbook didn't make is refused at the start (`:logbook/not-a-log`), not at the first run. backroom writes nowhere else.

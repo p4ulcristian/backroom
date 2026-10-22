@@ -1,5 +1,7 @@
 # Every value that sets behaviour is a setting; no hidden defaults
 
+> **Changed in part** by [Done background jobs are forgotten while the workers run](2026-10-23-done-background-jobs-are-forgotten-while-the-workers-run.md) (2026-10-23, v0.4.0): a ninth setting, `:forget-done-every-ms`; done background jobs are deleted every that long while the workers run, not only when they start.
+
 > **Changed in part** by [The app passes its log](2026-10-22-the-app-passes-its-log.md) (2026-10-22, v0.3.0): backroom writes to the app's log, `:log` in `start-workers!`'s options, not to `System.Logger` `backroom`.
 
 > **Changed in part** by [The app passes its wire; backroom never makes one](2026-10-22-the-app-passes-its-wire.md) (2026-10-22, v0.2.0): `add-background-job-to-queue!` and `start-workers!` take the app's wire, `:wire`, in their options; the checks are malli's own.

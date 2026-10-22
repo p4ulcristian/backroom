@@ -20,6 +20,7 @@
    [:retry-max-wait-ms [:int {:min 0}]]
    [:stuck-after-time-limit-ms [:int {:min 0}]]
    [:forget-done-after-ms [:int {:min 0}]]
+   [:forget-done-every-ms [:int {:min 1}]]
    [:stop-wait-ms [:int {:min 0}]]])
 
 (def settings-shape
@@ -34,8 +35,9 @@
    :stuck-after-time-limit-ms: a background job left running (its server
    stopped mid-run) is queued again once its own :timeout-ms and this much
    more have passed.
-   :forget-done-after-ms: done background jobs older than this are deleted
-   when the workers start.
+   :forget-done-after-ms: done background jobs older than this are deleted,
+   when the workers start and every :forget-done-every-ms while they run.
+   :forget-done-every-ms: how often the workers delete them.
    :stop-wait-ms: how long stop-workers! waits for the running background
    jobs to finish."
   (into [:map {:closed true}] settings-entries))

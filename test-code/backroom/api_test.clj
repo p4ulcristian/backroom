@@ -12,17 +12,6 @@
 
 (def ^:private port (some-> (System/getenv "BACKROOM_TEST_PORT") parse-long))
 
-(defn- make-pool [user]
-  (cellar/start-pool! {:host "localhost" :port port :database "postgres" :user user :password nil
-                       :tls :off :tls-root-cert nil
-                       :pool-size 4
-                       :connection-wait-ms 30000 :connection-check-wait-ms 5000
-                       :connection-max-lifetime-ms 1800000 :connection-keepalive-every-ms 120000
-                       :leak-warning-after-ms :none
-                       :connect-timeout-seconds 10 :read-timeout-seconds :none :tcp-keepalive? false
-                       :statement-timeout-ms 5000 :lock-timeout-ms :none :idle-in-transaction-timeout-ms :none
-                       :time-zone "UTC"}))
-
 (def ^:private settings
   {:workers                   2
    :poll-ms                   100
@@ -31,6 +20,7 @@
    :retry-max-wait-ms         3600000
    :stuck-after-time-limit-ms 60000
    :forget-done-after-ms      604800000
+   :forget-done-every-ms      3600000
    :stop-wait-ms              5000})
 
 (def ^:private now {:wire wire :run-in-ms 0 :key nil})
@@ -42,6 +32,18 @@
 (def ^:private log
   (logbook/log-function (logbook/make-logbook {:lowest-level :debug :format :json :errors-kept 100
                                                :write-to     #(swap! lines conj (json/read-value %))})))
+
+(defn- make-pool [user]
+  (cellar/start-pool! {:host "localhost" :port port :database "postgres" :user user :password nil
+                       :tls :off :tls-root-cert nil
+                       :pool-size 4
+                       :connection-wait-ms 30000 :connection-check-wait-ms 5000
+                       :connection-max-lifetime-ms 1800000 :connection-keepalive-every-ms 120000
+                       :leak-warning-after-ms :none
+                       :connect-timeout-seconds 10 :read-timeout-seconds :none :tcp-keepalive? false
+                       :statement-timeout-ms 5000 :lock-timeout-ms :none :idle-in-transaction-timeout-ms :none
+                       :time-zone "UTC"}
+                      {:log log}))
 
 (defn- find-lines [event]
   (filterv #(= event (get % "event")) @lines))
@@ -147,7 +149,7 @@
     (let [{:keys [type errors]} (find-refusal #(backroom/start-workers! nil {:wire wire :log log :kinds [] :schedules [] :workers 1 :poll-ms 100}))]
       (is (= :backroom/bad-options type))
       (is (= #{:retry-first-wait-ms :retry-wait-factor :retry-max-wait-ms :stuck-after-time-limit-ms
-               :forget-done-after-ms :stop-wait-ms}
+               :forget-done-after-ms :forget-done-every-ms :stop-wait-ms}
              (set (keys errors))))))
   (testing "and an unknown one"
     (is (= {:type :backroom/bad-options :errors {:workerz ["disallowed key"]}}
@@ -181,6 +183,12 @@
 (def ^:private count-done
   (cellar/make-query-from-sql-text "done jobs" "SELECT count(*) AS n FROM backroom.background_jobs WHERE background_job__state = 'done'"))
 
+(defn- insert-done-background-jobs! [pool how-many]
+  (run-sql! pool (str "INSERT INTO backroom.background_jobs (background_job__kind, background_job__params, background_job__state,"
+                      " background_job__max_attempts, background_job__timeout_ms, background_job__finished_at)"
+                      " SELECT 'test/fails-once', '{}', 'done', 3, 1000, now() - interval '1 second'"
+                      " FROM generate_series(1, " how-many ")")))
+
 (deftest the-settings-set-the-waits
   (if-not port
     (println "backroom.api-test: skipped, BACKROOM_TEST_PORT is not set")
@@ -201,8 +209,21 @@
                   "a failure that runs again is a warning, with the wait")
               (finally (backroom/stop-workers! workers)))))
         (testing "done background jobs older than :forget-done-after-ms are forgotten when the workers start"
+          (reset! lines [])
           (backroom/stop-workers! (backroom/start-workers! pool (assoc settings :wire wire :log log :forget-done-after-ms 0 :kinds [] :schedules [])))
-          (is (= 0 (:n (cellar/find-one-row pool count-done {})))))
+          (is (= 0 (:n (cellar/find-one-row pool count-done {}))))
+          (is (= [["info" {"background-job/forgotten" 1 "background-job/forget-done-after-ms" 0}]]
+                 (mapv #(vector (get % "level") (get % "data")) (find-lines "backroom/forgot-done")))
+              "each round is a line, info when it forgot any"))
+        (testing "and every :forget-done-every-ms while they run"
+          (let [workers (backroom/start-workers! pool (assoc settings :wire wire :log log :forget-done-after-ms 0 :forget-done-every-ms 100
+                                                             :kinds [] :schedules []))]
+            (try
+              (insert-done-background-jobs! pool 3)
+              (is (= 3 (:n (cellar/find-one-row pool count-done {}))))
+              (wait-until #(= 0 (:n (cellar/find-one-row pool count-done {}))))
+              (is (= 0 (:n (cellar/find-one-row pool count-done {}))) "forgotten without a restart")
+              (finally (backroom/stop-workers! workers)))))
         (testing "a background job left running is queued again past its time limit and :stuck-after-time-limit-ms"
           (run-sql! pool (str "INSERT INTO backroom.background_jobs (background_job__kind, background_job__params, background_job__state,"
                               " background_job__max_attempts, background_job__timeout_ms, background_job__locked_at)"
@@ -213,3 +234,23 @@
               (is (= 1 (:n (cellar/find-one-row pool count-done {}))))
               (finally (backroom/stop-workers! workers)))))
         (finally (cellar/stop-pool! pool))))))
+
+(deftest several-servers-forget-at-once
+  (if-not port
+    (println "backroom.api-test: skipped, BACKROOM_TEST_PORT is not set")
+    (let [pools (vec (repeatedly 3 #(make-pool (System/getenv "BACKROOM_TEST_USER"))))]
+      (try
+        (make-tables-afresh! (first pools))
+        (insert-done-background-jobs! (first pools) 5000)
+        (reset! lines [])
+        (testing "three servers forgetting every 10 ms skip each other's rows: each row is deleted once, and none fails"
+          (let [servers (mapv #(backroom/start-workers! % (assoc settings :wire wire :log log :forget-done-after-ms 0 :forget-done-every-ms 10
+                                                                 :kinds [] :schedules []))
+                              pools)]
+            (try
+              (wait-until #(= 0 (:n (cellar/find-one-row (first pools) count-done {}))))
+              (finally (run! backroom/stop-workers! servers))))
+          (is (= 0 (:n (cellar/find-one-row (first pools) count-done {}))))
+          (is (= 5000 (reduce + (map #(get-in % ["data" "background-job/forgotten"]) (find-lines "backroom/forgot-done")))))
+          (is (= [] (find-lines "backroom/forgetting-failed"))))
+        (finally (run! cellar/stop-pool! pools))))))

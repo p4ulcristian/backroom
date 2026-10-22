@@ -30,6 +30,7 @@
                                     :retry-max-wait-ms         3600000
                                     :stuck-after-time-limit-ms 60000
                                     :forget-done-after-ms      604800000
+                                    :forget-done-every-ms      3600000
                                     :stop-wait-ms              30000})
 
    A background job is a row in backroom.background_jobs; its tables are maps
@@ -44,7 +45,9 @@
    stops mid-background-job leaves it running; it is queued again once its
    time limit and :stuck-after-time-limit-ms have passed. A background job
    can run twice, so its work must be safe to repeat. Done background jobs
-   older than :forget-done-after-ms are deleted when the workers start.
+   older than :forget-done-after-ms are deleted when the workers start and
+   every :forget-done-every-ms while they run, on every server at once
+   (FOR UPDATE SKIP LOCKED: a row another server is deleting is skipped).
    Every setting and option is required, checked first (backroom.settings).
 
    A schedule puts its kind's background job in the queue at each time its cron line
@@ -55,7 +58,9 @@
    context, in its context's :log, so its own lines carry the job; a
    failure that runs again later is :warn :backroom/failed, one that ends
    the background job (its last attempt, or a give-up) :error
-   :backroom/gave-up, both with the exception or the time limit."
+   :backroom/gave-up, both with the exception or the time limit; each
+   round of forgetting :backroom/forgot-done (:info when it deleted any,
+   :debug when none), or :warn :backroom/forgetting-failed."
   (:require
    [clojure.string :as str]
    [backroom.cron :as cron]
@@ -292,6 +297,24 @@
           (log :warn :backroom/dispatcher-failed {:error e}))))
     (.poll wake (long poll-ms) TimeUnit/MILLISECONDS)))
 
+(defn- run-forgetter!
+  "Deletes the done background jobs older than :forget-done-after-ms, then
+   waits :forget-done-every-ms, or less when the workers stop; again until
+   they stop. Its own thread, so a long delete holds up no claim."
+  [{:keys [log pool stopped ^ArrayBlockingQueue forget-wake forget-done-after-ms forget-done-every-ms]}]
+  ;; the first round always runs, even when the workers stop at once
+  (loop []
+    (try
+      (let [forgotten (cellar/run-statement! pool delete-old-done-background-jobs
+                                             {:background-job/forget-done-after-ms forget-done-after-ms})]
+        (log (if (pos? forgotten) :info :debug) :backroom/forgot-done
+             {:background-job/forgotten            forgotten
+              :background-job/forget-done-after-ms forget-done-after-ms}))
+      (catch Throwable e
+        (log :warn :backroom/forgetting-failed {:error e})))
+    (.poll forget-wake (long forget-done-every-ms) TimeUnit/MILLISECONDS)
+    (when-not @stopped (recur))))
+
 (defn start-workers!
   "Starts the workers on this server. Options, every key required, checked
    first (backroom.settings/workers-options-shape):
@@ -303,13 +326,15 @@
      :schedules [{:kind a-background-job-kind :params {…} :cron \"0 1 * * *\"}]
      and the settings (settings-shape): :workers :poll-ms
      :retry-first-wait-ms :retry-wait-factor :retry-max-wait-ms
-     :stuck-after-time-limit-ms :forget-done-after-ms :stop-wait-ms
+     :stuck-after-time-limit-ms :forget-done-after-ms :forget-done-every-ms
+     :stop-wait-ms
 
-   Forgets done background jobs older than :forget-done-after-ms. Returns
-   the running workers."
+   Forgets done background jobs older than :forget-done-after-ms now, and
+   every :forget-done-every-ms while the workers run. Returns the running
+   workers."
   [pool options]
   (settings/check-workers-options options)
-  (let [{:keys [wire log kinds schedules workers forget-done-after-ms]} options
+  (let [{:keys [wire log kinds schedules workers]} options
         names (map :name kinds)]
     ;; a log logbook didn't make can't carry a job's context: refused now, not at the first run
     (logbook/with-context log {})
@@ -320,33 +345,40 @@
       (cron/turn-cron-line-into-allowed-values cron))
     (let [schedules-by-key (into {} (map (juxt #(make-schedule-key wire %) identity)) schedules)
           running          (merge (select-keys options [:wire :log :workers :poll-ms :retry-first-wait-ms :retry-wait-factor
-                                                        :retry-max-wait-ms :stuck-after-time-limit-ms :stop-wait-ms])
+                                                        :retry-max-wait-ms :stuck-after-time-limit-ms :forget-done-after-ms
+                                                        :forget-done-every-ms :stop-wait-ms])
                                   {:pool             pool
                                    :kinds-by-name    (into {} (map (juxt :name identity)) kinds)
                                    :schedules-by-key schedules-by-key
                                    :stopped          (atom false)
                                    :free-workers     (Semaphore. (int workers))
                                    ;; one wake-up is enough: the dispatcher looks at everything when it wakes
-                                   :wake             (ArrayBlockingQueue. 1)})]
-      (cellar/run-statement! pool delete-old-done-background-jobs {:background-job/forget-done-after-ms forget-done-after-ms})
+                                   :wake             (ArrayBlockingQueue. 1)
+                                   :forget-wake      (ArrayBlockingQueue. 1)})]
       (doseq [[key {:keys [cron]}] schedules-by-key]
         (cellar/run-statement! pool insert-schedule
                                {:background-job-schedule/key     key
                                 :background-job-schedule/next-at (turn-instant-into-utc
                                                                   (cron/find-next-time-for-cron-line cron (Instant/now)))}))
-      (assoc running :dispatcher (Thread/startVirtualThread #(run-dispatcher! running))))))
+      (assoc running
+             :dispatcher (Thread/startVirtualThread #(run-dispatcher! running))
+             :forgetter  (Thread/startVirtualThread #(run-forgetter! running))))))
 
 (defn stop-workers!
-  "Stops taking background jobs, and waits for the dispatcher and the
-   running background jobs to finish, at most :stop-wait-ms in all. Returns
-   whether they had all finished; one that hadn't goes on in the
-   background, and is queued again later if its server stops."
-  [{:keys [stopped ^Thread dispatcher ^Semaphore free-workers ^ArrayBlockingQueue wake workers stop-wait-ms]}]
+  "Stops taking background jobs and forgetting done ones, and waits for the
+   dispatcher, the forgetting and the running background jobs to finish, at
+   most :stop-wait-ms in all. Returns whether they had all finished; one
+   that hadn't goes on in the background, and is queued again later if its
+   server stops."
+  [{:keys [stopped ^Thread dispatcher ^Thread forgetter ^Semaphore free-workers ^ArrayBlockingQueue wake
+           ^ArrayBlockingQueue forget-wake workers stop-wait-ms]}]
   (reset! stopped true)
   (.offer wake :stop)
+  (.offer forget-wake :stop)
   (let [deadline (+ (System/nanoTime) (* 1000000 (long stop-wait-ms)))
         left-ms  #(max 0 (quot (- deadline (System/nanoTime)) 1000000))]
     (and (.join dispatcher (java.time.Duration/ofMillis (left-ms)))
+         (.join forgetter (java.time.Duration/ofMillis (left-ms)))
          (if (.tryAcquire free-workers (int workers) (long (left-ms)) TimeUnit/MILLISECONDS)
            (do (.release free-workers (int workers)) true)
            false))))
