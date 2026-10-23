@@ -136,7 +136,10 @@
                [:background-job/created-at   :time/instant {:default :now}]
                [:background-job/finished-at  :time/instant {:optional? true}]
                [:background-job/key          :string       {:optional? true :unique? true}]]
-   :indexes   [[:background-job/state :background-job/run-at]]
+   :indexes   [{:columns [[:background-job/state :ascending :nulls-last] [:background-job/run-at :ascending :nulls-last]]
+                :method :btree :ops {} :unique? false :where nil}]
+   :uniques   []
+   :checks    []
    :references []
    :triggers   []
    :gates     nil
@@ -148,6 +151,8 @@
    :columns   [[:background-job-schedule/key     :string       {:primary-key? true}]
                [:background-job-schedule/next-at :time/instant]]
    :indexes   []
+   :uniques   []
+   :checks    []
    :references []
    :triggers   []
    :gates     nil

@@ -88,7 +88,9 @@ kind this server doesn't run is counted as `"other"`.
   {:name :reports/send-nightly-report :system-actor :nightly-reports :params-shape [:map] :run (fn [_ _] …)
    :timeout-ms 600000 :attempts 3})
 
-(cellar/migrate! pool (into app-tables backroom/background-jobs-tables) changes migrate-options) ; cellar's migrate! options
+(cellar/migrate! pool {:tables     (into app-tables backroom/background-jobs-tables)
+                       :extensions [] :functions [] :views []}
+                 changes migrate-options) ; cellar's migrate! options
 
 (def workers (backroom/start-workers! pool {:wire                      wire
                                             :log                       log
