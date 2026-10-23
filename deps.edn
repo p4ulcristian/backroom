@@ -8,7 +8,7 @@
   ;; a reference what it does on delete, update and when checked, an index as a map;
   ;; migrate! takes {:tables :extensions :functions :views}; run-in-transaction! takes the
   ;; caller's :log, where work kept with run-after-commit! that fails is written
-  io.github.p4ulcristian/cellar  {:git/sha "4396e6bc9353b8eb614c0db7b839da537d11863e"}
+  io.github.p4ulcristian/cellar  {:git/sha "7e239c732113d162f2462bc217b3abb88a8bd208"}
   ;; a background job's params, checked by its shape and kept as JSON text, by
   ;; the wire the app makes and hands in
   io.github.p4ulcristian/wire    {:git/tag "v0.2.0" :git/sha "d66b7cb"}
