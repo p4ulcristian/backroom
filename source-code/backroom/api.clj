@@ -25,7 +25,7 @@
                                     :log                       log
                                     :meter                     meter
                                     ;; each job's one transaction, as its kind's actor (doorman's, in groundwork)
-                                    :run-in-transaction-as     (fn [pool actor f] (doorman/run-as-system! pool actor {:read-only? false} f))
+                                    :run-in-transaction-as     (fn [pool actor log f] (doorman/run-as-system! pool actor {:read-only? false :log log} f))
                                     :kinds                     [send-invoice-email]
                                     :schedules                 [{:kind send-nightly-report :params {} :cron \"0 1 * * *\"}]
                                     :workers                   4
@@ -239,7 +239,9 @@
 (defn- run-background-job-and-catch
   "Runs the background job's kind, and marks it done, in one transaction
    that run-in-transaction-as opens as the kind's :system-actor, with the
-   background job's log. Returns :ok or what was thrown."
+   background job's log, which the transaction carries (a :run's work kept
+   for after the commit that fails is written there). Returns :ok or what
+   was thrown."
   [wire pool kinds-by-name run-in-transaction-as log {:background-job/keys [id kind params attempts]}]
   (try
     (let [{:keys [run params-shape system-actor] :as background-job-kind} (get kinds-by-name kind)]
@@ -250,7 +252,7 @@
                                           wire params-shape (wire/turn-json-text-into-data wire params))]
         (when errors
           (throw (ex-info "The background job's params don't fit its shape" {:errors errors})))
-        (run-in-transaction-as pool system-actor
+        (run-in-transaction-as pool system-actor log
                                (fn [transaction]
                                  (run {:transaction transaction :background-job-id id :attempt attempts :log log} shaped-data)
                                  (mark-done-in-run! transaction id attempts)))
@@ -303,7 +305,8 @@
   "Queues the background job of every due schedule this server claims, and moves the
    schedule to its next time."
   [wire meter pool schedules-by-key]
-  (cellar/run-in-transaction! pool {:read-only? false}
+  ;; backroom's own, never handed to a kind's :run: keeps no work
+  (cellar/run-in-transaction! pool {:read-only? false :log nil}
     (fn [transaction]
       (doseq [{key :background-job-schedule/key} (cellar/find-rows transaction find-due-schedules {})
               :let [{:keys [kind params cron]} (get schedules-by-key key)]
@@ -377,9 +380,10 @@
                                          one with its background job's id and kind
      :meter     the app's meter          backroom's metrics are declared on it and counted
                                          into (backroom.metrics), the kinds as their set
-     :run-in-transaction-as (fn [pool system-actor f]), the app's: opens each
-                                         job's one transaction as its kind's :system-actor
-                                         (doorman's run-as-system!, in groundwork)
+     :run-in-transaction-as (fn [pool system-actor log f]), the app's: opens each
+                                         job's one transaction as its kind's :system-actor,
+                                         carrying log, the job's (cellar's :log; doorman's
+                                         run-as-system!, in groundwork)
      :kinds     [background job kinds]   every kind this server runs
      :schedules [{:kind a-background-job-kind :params {…} :cron \"0 1 * * *\"}]
      and the settings (settings-shape): :workers :poll-ms

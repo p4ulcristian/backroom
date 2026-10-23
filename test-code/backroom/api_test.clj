@@ -53,10 +53,11 @@
 
 (defn- run-in-transaction-as
   "The tests' :run-in-transaction-as, as an app's (doorman's run-as-system!
-   in groundwork) opens one: a transaction on the pool; it notes the actor."
-  [pool system-actor f]
+   in groundwork) opens one: a transaction on the pool, carrying the job's
+   log; it notes the actor."
+  [pool system-actor log f]
   (swap! actors-asked conj system-actor)
-  (cellar/run-in-transaction! pool {:read-only? false} f))
+  (cellar/run-in-transaction! pool {:read-only? false :log log} f))
 
 (defn- with-new-meter
   "start-workers!'s options with the tests' wire, log and
@@ -432,9 +433,9 @@
           (let [opened  (atom 0)
                 workers (backroom/start-workers! pool (assoc (with-new-meter (assoc settings :kinds [order-emails] :schedules []))
                                                              :run-in-transaction-as
-                                                             (fn [pool _actor f]
+                                                             (fn [pool _actor log f]
                                                                (swap! opened inc)
-                                                               (cellar/run-in-transaction! pool {:read-only? false}
+                                                               (cellar/run-in-transaction! pool {:read-only? false :log log}
                                                                  (fn [transaction]
                                                                    (f transaction)
                                                                    (throw (ex-info "the commit failed" {})))))))]
@@ -446,5 +447,21 @@
               (is (= "clojure.lang.ExceptionInfo: the commit failed"
                      (:background-job/last-error (first (backroom/list-dead-background-jobs pool 10))))
                   "its one attempt failed, with the transaction's error")
+              (finally (backroom/stop-workers! workers)))))
+        (testing "the transaction carries the job's log: work kept for after its commit that fails is written with the job's id and kind"
+          (reset! lines [])
+          (let [clears  {:name         :test.cache/clear
+                         :system-actor :order-emails
+                         :params-shape [:map]
+                         :run          (fn [{:keys [transaction]} _]
+                                         (cellar/run-after-commit! transaction #(throw (ex-info "the cache is gone" {}))))
+                         :timeout-ms   5000
+                         :attempts     1}
+                workers (backroom/start-workers! pool (with-new-meter (assoc settings :kinds [clears] :schedules [])))]
+            (try
+              (let [id (backroom/add-background-job-to-queue! pool clears {} now)]
+                (wait-until #(seq (find-lines "cellar/after-commit-failed")))
+                (is (= [{"background-job/id" (str id) "background-job/kind" "test.cache/clear"}]
+                       (mapv #(get % "context") (find-lines "cellar/after-commit-failed")))))
               (finally (backroom/stop-workers! workers)))))
         (finally (cellar/stop-pool! pool))))))

@@ -96,7 +96,7 @@ kind this server doesn't run is counted as `"other"`.
                                             :log                       log
                                             :meter                     meter
                                             ;; opens each job's one transaction as its kind's actor: doorman's, in groundwork
-                                            :run-in-transaction-as     (fn [pool actor f] (doorman/run-as-system! pool actor {:read-only? false} f))
+                                            :run-in-transaction-as     (fn [pool actor log f] (doorman/run-as-system! pool actor {:read-only? false :log log} f))
                                             :kinds                     [send-invoice-email send-nightly-report]
                                             :schedules                 [{:kind send-nightly-report :params {} :cron "0 1 * * *"}]
                                             :workers                   4
@@ -118,8 +118,10 @@ kind this server doesn't run is counted as `"other"`.
 ```
 
 Every job kind names its system actor, `:system-actor`, a keyword without a
-namespace: the app's `:run-in-transaction-as`, `(fn [pool system-actor f])`,
-opens the job's one transaction as it and returns what `f` returns
+namespace: the app's `:run-in-transaction-as`, `(fn [pool system-actor log f])`,
+opens the job's one transaction as it, carrying `log`, the job's (cellar's
+`:log`: work kept for after the commit that fails is written there, with
+the job's id and kind), and returns what `f` returns
 (doorman's `run-as-system!`, in groundwork), so a job reaches what that
 actor's sentences give it. The job is marked done inside that transaction:
 the work and the mark commit together, or neither; a run past its time

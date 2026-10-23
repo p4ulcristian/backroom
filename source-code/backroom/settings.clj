@@ -94,11 +94,13 @@
 
 (def run-in-transaction-as-entry
   "How a background job's one transaction is opened, the app's: (fn [pool
-   system-actor f]) runs (f transaction) in one transaction of its own,
-   as the kind's :system-actor, and returns what f returns; a throw rolls
-   it back. In groundwork, doorman's run-as-system! with {:read-only?
-   false}. backroom knows no actor: it hands the kind's name over."
-  [:run-in-transaction-as [fn? {:error/message "should be the app's (fn [pool system-actor f]), doorman's run-as-system! in groundwork"}]])
+   system-actor log f]) runs (f transaction) in one transaction of its own,
+   as the kind's :system-actor, carrying log (cellar's :log: the job's,
+   with its id and kind, where work kept for after the commit that fails
+   is written), and returns what f returns; a throw rolls it back. In
+   groundwork, doorman's run-as-system! with {:read-only? false :log log}.
+   backroom knows no actor: it hands the kind's name over."
+  [:run-in-transaction-as [fn? {:error/message "should be the app's (fn [pool system-actor log f]), doorman's run-as-system! in groundwork"}]])
 
 (def workers-options-shape
   "start-workers!'s options: the app's wire, log and meter, how a job's
