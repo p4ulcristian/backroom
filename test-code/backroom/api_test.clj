@@ -46,10 +46,23 @@
 
 (def ^:private now {:wire wire :meter queue-meter :run-in-ms 0 :key nil})
 
+(def ^:private actors-asked
+  "The system actors the tests' run-in-transaction-as was asked to open a
+   transaction as, in order."
+  (atom []))
+
+(defn- run-in-transaction-as
+  "The tests' :run-in-transaction-as, as an app's (doorman's run-as-system!
+   in groundwork) opens one: a transaction on the pool; it notes the actor."
+  [pool system-actor f]
+  (swap! actors-asked conj system-actor)
+  (cellar/run-in-transaction! pool {:read-only? false} f))
+
 (defn- with-new-meter
-  "start-workers!'s options with the tests' wire and log, and a new meter."
+  "start-workers!'s options with the tests' wire, log and
+   run-in-transaction-as, and a new meter."
   [options]
-  (assoc options :wire wire :log log :meter (make-meter)))
+  (assoc options :wire wire :log log :meter (make-meter) :run-in-transaction-as run-in-transaction-as))
 
 (defn- make-pool [user]
   (cellar/start-pool! {:host "localhost" :port port :database "postgres" :user user :password nil
@@ -82,6 +95,7 @@
 
 (def ^:private send-invoice-email
   {:name         :test.mail/send-invoice-email
+   :system-actor :test-jobs
    :params-shape [:map [:order/id :int]]
    :run          (fn [{job-log :log} params]
                    (job-log :info :test.mail/sent {:order/id (:order/id params)})
@@ -91,6 +105,7 @@
 
 (def ^:private give-up
   {:name         :test/give-up
+   :system-actor :test-jobs
    :params-shape [:map]
    :run          (fn [_ _] (throw (backroom/make-give-up-exception "The order is gone" {})))
    :timeout-ms   5000
@@ -168,7 +183,7 @@
   (testing "start-workers! names each missing setting, before anything runs"
     (let [{:keys [type errors]} (find-refusal #(backroom/start-workers! nil {:wire wire :log log :kinds [] :schedules [] :workers 1 :poll-ms 100}))]
       (is (= :backroom/bad-options type))
-      (is (= #{:meter :retry-first-wait-ms :retry-wait-factor :retry-max-wait-ms :stuck-after-time-limit-ms
+      (is (= #{:meter :run-in-transaction-as :retry-first-wait-ms :retry-wait-factor :retry-max-wait-ms :stuck-after-time-limit-ms
                :forget-done-after-ms :forget-done-every-ms :stop-wait-ms :metric-buckets}
              (set (keys errors))))))
   (testing "and an unknown one"
@@ -177,15 +192,23 @@
   (testing "a kind writes out every key"
     (is (= {:type :backroom/bad-kind :errors {:attempts ["missing required key"]}}
            (find-refusal #(backroom/add-background-job-to-queue! nil (dissoc send-invoice-email :attempts) {:order/id 1} now)))))
+  (testing "a kind names its system actor, a keyword without a namespace"
+    (is (= {:type :backroom/bad-kind :errors {:system-actor ["missing required key"]}}
+           (find-refusal #(backroom/add-background-job-to-queue! nil (dissoc send-invoice-email :system-actor) {:order/id 1} now))))
+    (is (= :backroom/bad-options
+           (:type (find-refusal #(backroom/start-workers! nil (with-new-meter (assoc settings :kinds [(assoc send-invoice-email :system-actor :test/jobs)]
+                                                                                      :schedules []))))))
+        "start-workers! checks its kinds too"))
   (testing "add-background-job-to-queue! says :run-in-ms and :key"
     (is (= {:type :backroom/bad-options :errors {:key ["missing required key"]}}
            (find-refusal #(backroom/add-background-job-to-queue! nil send-invoice-email {:order/id 1} (dissoc now :key))))))
   (testing "backroom makes no wire and no log: start-workers! takes the app's both"
     (is (= {:type :backroom/bad-options :errors {:wire ["missing required key"] :log ["missing required key"]
-                                                 :meter ["missing required key"]}}
+                                                 :meter ["missing required key"] :run-in-transaction-as ["missing required key"]}}
            (find-refusal #(backroom/start-workers! nil (assoc settings :kinds [] :schedules [])))))
     (is (= :logbook/not-a-log
            (:type (ex-data (try (backroom/start-workers! nil (assoc settings :wire wire :log (fn [_ _ _]) :meter (make-meter)
+                                                                    :run-in-transaction-as run-in-transaction-as
                                                                     :kinds [] :schedules []))
                                 (catch clojure.lang.ExceptionInfo e e)))))
         "a log logbook didn't make can't carry a background job's context: refused at the start"))
@@ -207,6 +230,7 @@
 
 (def ^:private fails-once
   {:name         :test/fails-once
+   :system-actor :test-jobs
    :params-shape [:map]
    :run          (fn [_ _] (when (= 1 (swap! runs inc)) (throw (ex-info "the first time" {}))))
    :timeout-ms   5000
@@ -295,6 +319,7 @@
 
 (def ^:private always-fails
   {:name         :test/always-fails
+   :system-actor :test-jobs
    :params-shape [:map]
    :run          (fn [_ _] (throw (ex-info "never works" {})))
    :timeout-ms   5000
@@ -302,6 +327,7 @@
 
 (def ^:private slow
   {:name         :test/slow
+   :system-actor :test-jobs
    :params-shape [:map]
    :run          (fn [_ _] (Thread/sleep 600))
    :timeout-ms   5000
@@ -321,6 +347,7 @@
         (let [own-log (logbook/log-function (logbook/make-logbook {:lowest-level :debug :format :json :errors-kept 10
                                                                     :write-to (fn [_])}))
               workers (backroom/start-workers! pool (assoc settings :wire wire :log own-log :meter meter :retry-first-wait-ms 100
+                                                           :run-in-transaction-as run-in-transaction-as
                                                            :kinds [send-invoice-email give-up always-fails slow] :schedules []))]
           (try
             (testing "declared at the start: a metric without labels is there at 0"
@@ -373,3 +400,51 @@
             (finally (backroom/stop-workers! workers))))
         (finally (cellar/stop-pool! pool))))))
 
+
+(def ^:private order-emails
+  {:name         :test.mail/send-order-email
+   :system-actor :order-emails
+   :params-shape [:map [:order/id :int]]
+   :run          (fn [_ params] (swap! emails-sent conj (:order/id params)))
+   :timeout-ms   5000
+   :attempts     1})
+
+(def ^:private count-in-state
+  (cellar/make-query-from-sql-text "jobs in a state" "SELECT count(*) AS n FROM backroom.background_jobs WHERE background_job__state = CAST(:state AS text)"))
+
+(deftest a-job-runs-as-its-kinds-system-actor-in-one-transaction
+  (if-not port
+    (println "backroom.api-test: skipped, BACKROOM_TEST_PORT is not set")
+    (let [pool (make-pool (System/getenv "BACKROOM_TEST_USER"))]
+      (try
+        (make-tables-afresh! pool)
+        (reset! emails-sent [])
+        (reset! actors-asked [])
+        (testing "the transaction is opened by the app's run-in-transaction-as, as the kind's actor"
+          (let [workers (backroom/start-workers! pool (with-new-meter (assoc settings :kinds [order-emails send-invoice-email] :schedules [])))]
+            (try
+              (backroom/add-background-job-to-queue! pool order-emails {:order/id 1042} now)
+              (wait-until #(= 1 (:n (cellar/find-one-row pool count-in-state {:state "done"}))))
+              (is (= [1042] @emails-sent))
+              (is (= [:order-emails] @actors-asked) "the kind's :system-actor, nothing else")
+              (finally (backroom/stop-workers! workers)))))
+        (testing "the work and the done-mark commit together: a transaction that doesn't commit leaves the job not done"
+          (let [opened  (atom 0)
+                workers (backroom/start-workers! pool (assoc (with-new-meter (assoc settings :kinds [order-emails] :schedules []))
+                                                             :run-in-transaction-as
+                                                             (fn [pool _actor f]
+                                                               (swap! opened inc)
+                                                               (cellar/run-in-transaction! pool {:read-only? false}
+                                                                 (fn [transaction]
+                                                                   (f transaction)
+                                                                   (throw (ex-info "the commit failed" {})))))))]
+            (try
+              (backroom/add-background-job-to-queue! pool order-emails {:order/id 7} now)
+              (wait-until #(= 1 (:n (cellar/find-one-row pool count-in-state {:state "dead"}))))
+              (is (= 1 @opened))
+              (is (= 1 (:n (cellar/find-one-row pool count-in-state {:state "done"}))) "only the first job is done")
+              (is (= "clojure.lang.ExceptionInfo: the commit failed"
+                     (:background-job/last-error (first (backroom/list-dead-background-jobs pool 10))))
+                  "its one attempt failed, with the transaction's error")
+              (finally (backroom/stop-workers! workers)))))
+        (finally (cellar/stop-pool! pool))))))

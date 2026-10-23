@@ -5,7 +5,8 @@ Background jobs for Clojure on Postgres: work that runs outside a request.
 request's transaction (then it exists only if that commits). **The
 workers:** each server claims due background jobs (`FOR UPDATE SKIP
 LOCKED`, so no two run the same one), runs each in one transaction within
-its time limit, retries a failure later and later (as long as its settings say), and
+its time limit, opened by the app as the kind's system actor, in which the
+job is also marked done, retries a failure later and later (as long as its settings say), and
 lets one give up for good. **The schedules:** cron lines in UTC that queue
 a background job at their times, on one server.
 
@@ -49,7 +50,7 @@ kind this server doesn't run is counted as `"other"`.
 | `background-jobs-tables` `background-jobs-table` `background-job-schedules-table` | its two tables, `backroom.background_jobs` and `backroom.background_job_schedules`, as maps for cellar |
 | `add-background-job-to-queue!` | saves a background job of a kind, its params checked by the kind's `:params-shape`, and counts it; options `:wire` and `:meter` (the app's), `:run-in-ms` and `:key` (nil, or one at a time), all written out |
 | `make-give-up-exception` | what a kind's `:run` throws to end its background job for good: dead at once, kept with the message |
-| `start-workers!` `stop-workers!` `settings-shape` | the workers on this server (`:wire` `:log` `:meter` `:kinds` `:schedules` and the settings); stopping waits for running ones, at most `:stop-wait-ms`; the settings as a malli shape |
+| `start-workers!` `stop-workers!` `settings-shape` | the workers on this server (`:wire` `:log` `:meter` `:run-in-transaction-as` `:kinds` `:schedules` and the settings); stopping waits for running ones, at most `:stop-wait-ms`; the settings as a malli shape |
 | `list-queued-background-jobs` `list-dead-background-jobs` | what waits, and what had all its attempts or gave up, with its last error |
 | `run-background-job-again-now!` | queues a dead or waiting background job to run now, its attempts counted afresh |
 
@@ -77,19 +78,23 @@ kind this server doesn't run is counted as `"other"`.
 
 (def send-invoice-email
   {:name         :billing/send-invoice-email
+   :system-actor :invoice-emails                 ; the named actor its one transaction runs as
    :params-shape [:map [:order/id :uuid]]
    :run          (fn [{:keys [transaction background-job-id attempt log]} {:order/keys [id]}] …) ; log: the job's
    :timeout-ms   60000
    :attempts     5})
 
 (def send-nightly-report
-  {:name :reports/send-nightly-report :params-shape [:map] :run (fn [_ _] …) :timeout-ms 600000 :attempts 3})
+  {:name :reports/send-nightly-report :system-actor :nightly-reports :params-shape [:map] :run (fn [_ _] …)
+   :timeout-ms 600000 :attempts 3})
 
 (cellar/migrate! pool (into app-tables backroom/background-jobs-tables) changes migrate-options) ; cellar's migrate! options
 
 (def workers (backroom/start-workers! pool {:wire                      wire
                                             :log                       log
                                             :meter                     meter
+                                            ;; opens each job's one transaction as its kind's actor: doorman's, in groundwork
+                                            :run-in-transaction-as     (fn [pool actor f] (doorman/run-as-system! pool actor {:read-only? false} f))
                                             :kinds                     [send-invoice-email send-nightly-report]
                                             :schedules                 [{:kind send-nightly-report :params {} :cron "0 1 * * *"}]
                                             :workers                   4
@@ -109,6 +114,16 @@ kind this server doesn't run is counted as `"other"`.
 ;; the order was deleted: no retry helps
 (throw (backroom/make-give-up-exception "The order was deleted" {:order/id order-id}))
 ```
+
+Every job kind names its system actor, `:system-actor`, a keyword without a
+namespace: the app's `:run-in-transaction-as`, `(fn [pool system-actor f])`,
+opens the job's one transaction as it and returns what `f` returns
+(doorman's `run-as-system!`, in groundwork), so a job reaches what that
+actor's sentences give it. The job is marked done inside that transaction:
+the work and the mark commit together, or neither; a run past its time
+limit, already marked failed, marks nothing and its work is undone. backroom
+knows no doorman: it hands the kind's actor over
+([why](decisions/2026-10-23-a-job-kind-names-its-system-actor.md)).
 
 Every setting and option is required, and every key of a kind and a
 schedule: a missing or unknown one is refused, named, with every other

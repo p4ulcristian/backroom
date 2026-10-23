@@ -1,5 +1,7 @@
 # A job kind is a map, and the library makes its own tables
 
+> **Changed in part** by [A job kind names its system actor, and its one transaction runs as it](2026-10-23-a-job-kind-names-its-system-actor.md) (2026-10-23, built on tidy-up, not released): a kind writes `:system-actor`; its `:run` and its done-mark run in one transaction the app's `:run-in-transaction-as` opens as that actor.
+
 > **Changed in part** by [Every value that sets behaviour is a setting](2026-10-22-every-value-that-sets-behaviour-is-a-setting.md) (2026-10-22, v0.1.2): the retry waits (30 s doubling up to an hour), the minute past a stuck job's time limit and the week done jobs are kept are settings, `:retry-first-wait-ms`, `:retry-wait-factor`, `:retry-max-wait-ms`, `:stuck-after-time-limit-ms` and `:forget-done-after-ms`.
 
 > **Changed in part** by [backroom is its own library](2026-10-22-backroom-is-its-own-library.md) (2026-10-22): the library is backroom (`backroom.api`), its tables `backroom.background_jobs` and `backroom.background_job_schedules`.

@@ -5,6 +5,7 @@
      ;; a background job kind: a map, like a step
      (def send-invoice-email
        {:name         :app.mail/send-invoice-email
+        :system-actor :invoice-emails                         ; the named actor its transaction runs as
         :params-shape [:map [:order/id :int]]
         :run          (fn [background-job-context params] …)   ; background-job-context: :transaction :background-job-id :attempt :log
         :timeout-ms   60000
@@ -23,6 +24,8 @@
      (backroom/start-workers! pool {:wire                      wire
                                     :log                       log
                                     :meter                     meter
+                                    ;; each job's one transaction, as its kind's actor (doorman's, in groundwork)
+                                    :run-in-transaction-as     (fn [pool actor f] (doorman/run-as-system! pool actor {:read-only? false} f))
                                     :kinds                     [send-invoice-email]
                                     :schedules                 [{:kind send-nightly-report :params {} :cron \"0 1 * * *\"}]
                                     :workers                   4
@@ -40,7 +43,11 @@
    (background-jobs-tables) the app passes to cellar with its own. Every :poll-ms the workers look for
    due background jobs; each free worker claims one (FOR UPDATE SKIP LOCKED, so no two
    servers run the same one) and runs its kind's :run in one transaction,
-   within :timeout-ms. A background job that throws or runs out of time runs again
+   within :timeout-ms: the transaction :run-in-transaction-as opens as the
+   kind's :system-actor, in which the background job is also marked done,
+   so the work and the mark commit together, or neither (a run past its
+   time limit, already marked failed, marks nothing and its work is
+   undone). A background job that throws or runs out of time runs again
    later, waiting longer each time (:retry-first-wait-ms, times
    :retry-wait-factor each time, up to :retry-max-wait-ms), until it has had
    its :attempts; then it is dead, kept with its last error. A background
@@ -214,12 +221,23 @@
   [{:keys [retry-first-wait-ms retry-wait-factor retry-max-wait-ms]} attempt]
   (long (min retry-max-wait-ms (* retry-first-wait-ms (Math/pow retry-wait-factor (dec attempt))))))
 
+(defn- mark-done-in-run!
+  "Marks the background job done in its run's own transaction; throws,
+   rolling the work back, when this run no longer holds it (marked failed
+   past its time limit, or queued again)."
+  [transaction id attempts]
+  (when (zero? (cellar/run-statement! transaction update-background-job-to-done
+                                      {:background-job/id id :background-job/attempts attempts}))
+    (throw (ex-info "The background job was no longer this run's to mark done: its work is undone"
+                    {:type :backroom/run-overtaken :background-job/id id :background-job/attempt attempts}))))
+
 (defn- run-background-job-and-catch
-  "Runs the background job's kind in one transaction, with the background
-   job's log. Returns :ok or what was thrown."
-  [wire pool kinds-by-name log {:background-job/keys [id kind params attempts]}]
+  "Runs the background job's kind, and marks it done, in one transaction
+   that run-in-transaction-as opens as the kind's :system-actor, with the
+   background job's log. Returns :ok or what was thrown."
+  [wire pool kinds-by-name run-in-transaction-as log {:background-job/keys [id kind params attempts]}]
   (try
-    (let [{:keys [run params-shape] :as background-job-kind} (get kinds-by-name kind)]
+    (let [{:keys [run params-shape system-actor] :as background-job-kind} (get kinds-by-name kind)]
       (when-not background-job-kind
         (throw (ex-info (str "No background job kind " kind " on this server")
                         {:type :backroom/unknown-kind :kind kind})))
@@ -227,9 +245,10 @@
                                           wire params-shape (wire/turn-json-text-into-data wire params))]
         (when errors
           (throw (ex-info "The background job's params don't fit its shape" {:errors errors})))
-        (cellar/run-in-transaction! pool {:read-only? false}
-          (fn [transaction]
-            (run {:transaction transaction :background-job-id id :attempt attempts :log log} shaped-data)))
+        (run-in-transaction-as pool system-actor
+                               (fn [transaction]
+                                 (run {:transaction transaction :background-job-id id :attempt attempts :log log} shaped-data)
+                                 (mark-done-in-run! transaction id attempts)))
         :ok))
     (catch Throwable throwable throwable)))
 
@@ -246,16 +265,16 @@
   "Runs a claimed background job within its time limit and saves what
    happened; log is the background job's. Records the run's time; returns
    how it ended: :done, :failed or :gave-up (backroom.metrics/outcomes)."
-  [{:keys [wire pool kinds-by-name meter] :as running} log {:background-job/keys [id kind attempts timeout-ms] :as background-job}]
+  [{:keys [wire pool kinds-by-name run-in-transaction-as meter] :as running} log {:background-job/keys [id kind attempts timeout-ms] :as background-job}]
   (let [outcome (promise)
         started (System/nanoTime)
-        thread  (Thread/startVirtualThread #(deliver outcome (run-background-job-and-catch wire pool kinds-by-name log background-job)))
+        thread  (Thread/startVirtualThread #(deliver outcome (run-background-job-and-catch wire pool kinds-by-name run-in-transaction-as
+                                                                                            log background-job)))
         result  (deref outcome timeout-ms :timed-out)]
     (metrics/record-run-time! meter kind started)
     (when (= :timed-out result) (.interrupt thread))
     (if (= :ok result)
-      (do (cellar/run-statement! pool update-background-job-to-done {:background-job/id id})
-          :done)
+      :done                             ; marked in the run's own transaction
       (let [retry-ms (find-wait-before-retry-ms running attempts)
             state    (:background-job/state
                       (cellar/find-one-row pool update-background-job-to-failed
@@ -353,6 +372,9 @@
                                          one with its background job's id and kind
      :meter     the app's meter          backroom's metrics are declared on it and counted
                                          into (backroom.metrics), the kinds as their set
+     :run-in-transaction-as (fn [pool system-actor f]), the app's: opens each
+                                         job's one transaction as its kind's :system-actor
+                                         (doorman's run-as-system!, in groundwork)
      :kinds     [background job kinds]   every kind this server runs
      :schedules [{:kind a-background-job-kind :params {…} :cron \"0 1 * * *\"}]
      and the settings (settings-shape): :workers :poll-ms
@@ -377,7 +399,7 @@
     (doseq [{:keys [cron]} schedules]
       (cron/turn-cron-line-into-allowed-values cron))
     (let [schedules-by-key (into {} (map (juxt #(make-schedule-key wire %) identity)) schedules)
-          running          (merge (select-keys options [:wire :log :meter :workers :poll-ms :retry-first-wait-ms :retry-wait-factor
+          running          (merge (select-keys options [:wire :log :meter :run-in-transaction-as :workers :poll-ms :retry-first-wait-ms :retry-wait-factor
                                                         :retry-max-wait-ms :stuck-after-time-limit-ms :forget-done-after-ms
                                                         :forget-done-every-ms :stop-wait-ms])
                                   {:pool             pool

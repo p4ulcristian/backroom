@@ -49,13 +49,17 @@
 
 (def kind-shape
   "A background job kind, every key required. :name, a namespaced keyword;
-   :params-shape, the malli shape its params fit; :run, (fn [context
-   params]), the context {:transaction :background-job-id :attempt :log},
-   :log the workers' log with the background job's id and kind as its
-   context; :timeout-ms, how long one run may take; :attempts, how many
-   runs it gets before it is dead."
+   :system-actor, the named system actor its one transaction runs as (a
+   keyword without a namespace, :order-emails: doorman's, in groundwork,
+   whose sentences say what the job reaches), handed to the workers'
+   :run-in-transaction-as; :params-shape, the malli shape its params fit;
+   :run, (fn [context params]), the context {:transaction
+   :background-job-id :attempt :log}, :log the workers' log with the
+   background job's id and kind as its context; :timeout-ms, how long one
+   run may take; :attempts, how many runs it gets before it is dead."
   [:map {:closed true}
    [:name :qualified-keyword]
+   [:system-actor [simple-keyword? {:error/message "should be a keyword without a namespace, the named system actor"}]]
    [:params-shape :any]
    [:run fn?]
    [:timeout-ms [:int {:min 1}]]
@@ -88,13 +92,23 @@
    (:meter/not-a-meter)."
   [:meter [some? {:error/message "should be the app's meter, made by meter.api/make-meter"}]])
 
+(def run-in-transaction-as-entry
+  "How a background job's one transaction is opened, the app's: (fn [pool
+   system-actor f]) runs (f transaction) in one transaction of its own,
+   as the kind's :system-actor, and returns what f returns; a throw rolls
+   it back. In groundwork, doorman's run-as-system! with {:read-only?
+   false}. backroom knows no actor: it hands the kind's name over."
+  [:run-in-transaction-as [fn? {:error/message "should be the app's (fn [pool system-actor f]), doorman's run-as-system! in groundwork"}]])
+
 (def workers-options-shape
-  "start-workers!'s options: the app's wire, log and meter, the settings,
-   the kinds this server runs and the schedules, every key required."
+  "start-workers!'s options: the app's wire, log and meter, how a job's
+   transaction is opened (:run-in-transaction-as), the settings, the kinds
+   this server runs and the schedules, every key required."
   (into [:map {:closed true}
          wire-entry
          log-entry
          meter-entry
+         run-in-transaction-as-entry
          [:kinds [:sequential kind-shape]]
          [:schedules [:sequential schedule-shape]]]
         settings-entries))
