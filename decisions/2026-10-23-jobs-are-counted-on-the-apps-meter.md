@@ -1,5 +1,7 @@
 # Background jobs are counted on the app's meter
 
+> **Changed in part** by [The family and its composer are groundwork](https://github.com/p4ulcristian/groundwork/blob/Starting-from-the-bottom/decisions/2026-10-23-the-family-and-its-composer-are-groundwork.md) (2026-10-23): manor, the family, and house, the composer, are both named groundwork now.
+
 > Changes in part [Every value that sets behaviour is a setting](2026-10-22-every-value-that-sets-behaviour-is-a-setting.md) (the settings gain `:metric-buckets`) and [The app passes its log](2026-10-22-the-app-passes-its-log.md) (`start-workers!`' options gain `:meter`). Since v0.5.0, on meter v0.1.2.
 
 **Decision:** `start-workers!` takes the app's meter (meter's `make-meter`) as a required option, `:meter`, never nil, beside `:log`, and declares backroom's metrics on it before anything runs; `add-background-job-to-queue!` takes it too, and counts the job it adds:
