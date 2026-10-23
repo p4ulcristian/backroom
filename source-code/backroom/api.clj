@@ -130,6 +130,8 @@
                [:background-job/finished-at  :time/instant {:optional? true}]
                [:background-job/key          :string       {:optional? true :unique? true}]]
    :indexes   [[:background-job/state :background-job/run-at]]
+   :references []
+   :triggers   []
    :gates     nil
    :on-change nil})
 
@@ -139,6 +141,8 @@
    :columns   [[:background-job-schedule/key     :string       {:primary-key? true}]
                [:background-job-schedule/next-at :time/instant]]
    :indexes   []
+   :references []
+   :triggers   []
    :gates     nil
    :on-change nil})
 
