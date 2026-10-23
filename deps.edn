@@ -8,14 +8,14 @@
   ;; a reference what it does on delete, update and when checked, an index as a map;
   ;; migrate! takes {:tables :extensions :functions :views}; run-in-transaction! takes the
   ;; caller's :log, where work kept with run-after-commit! that fails is written
-  io.github.p4ulcristian/groundwork-postgres  {:git/tag "v0.4.6" :git/sha "4396e6b"}
+  io.github.p4ulcristian/groundwork-postgres  {:git/tag "v0.4.7" :git/sha "d6f226c"}
   ;; a background job's params, checked by its shape and kept as JSON text, by
   ;; the shaper the app makes and hands in
-  io.github.p4ulcristian/groundwork-shaped-json    {:git/tag "v0.2.1" :git/sha "900a84d"}
+  io.github.p4ulcristian/groundwork-shaped-json    {:git/tag "v0.2.2" :git/sha "1c0fcf9"}
   ;; the app's log, handed in; each background job's run gets one that knows the job
-  io.github.p4ulcristian/groundwork-logs {:git/tag "v0.1.2" :git/sha "823f8fc"}
+  io.github.p4ulcristian/groundwork-logs {:git/tag "v0.1.3" :git/sha "8d1846e"}
   ;; the app's meter, handed in: jobs added, runs by outcome and time, jobs running
-  io.github.p4ulcristian/groundwork-metrics   {:git/tag "v0.1.4" :git/sha "bf81c46"}
+  io.github.p4ulcristian/groundwork-metrics   {:git/tag "v0.1.5" :git/sha "1cffe8e"}
   ;; the settings, options and kinds, checked before anything runs
   metosin/malli                 {:mvn/version "0.20.3"}}
 
