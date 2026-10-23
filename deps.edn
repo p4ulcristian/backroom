@@ -1,5 +1,5 @@
-;; backroom: background jobs on Postgres. A queue, workers and schedules.
-;; One tree: source-code/backroom/.
+;; groundwork-background-jobs: background jobs on Postgres. A queue, workers and schedules.
+;; One tree: source-code/groundwork_background_jobs/.
 {:paths ["source-code"]
 
  :deps
@@ -8,19 +8,19 @@
   ;; a reference what it does on delete, update and when checked, an index as a map;
   ;; migrate! takes {:tables :extensions :functions :views}; run-in-transaction! takes the
   ;; caller's :log, where work kept with run-after-commit! that fails is written
-  io.github.p4ulcristian/cellar  {:git/tag "v0.4.6" :git/sha "4396e6b"}
+  io.github.p4ulcristian/groundwork-postgres  {:git/tag "v0.4.6" :git/sha "4396e6b"}
   ;; a background job's params, checked by its shape and kept as JSON text, by
-  ;; the wire the app makes and hands in
-  io.github.p4ulcristian/wire    {:git/tag "v0.2.1" :git/sha "900a84d"}
+  ;; the shaper the app makes and hands in
+  io.github.p4ulcristian/groundwork-shaped-json    {:git/tag "v0.2.1" :git/sha "900a84d"}
   ;; the app's log, handed in; each background job's run gets one that knows the job
-  io.github.p4ulcristian/logbook {:git/tag "v0.1.2" :git/sha "823f8fc"}
+  io.github.p4ulcristian/groundwork-logs {:git/tag "v0.1.2" :git/sha "823f8fc"}
   ;; the app's meter, handed in: jobs added, runs by outcome and time, jobs running
-  io.github.p4ulcristian/meter   {:git/tag "v0.1.4" :git/sha "bf81c46"}
+  io.github.p4ulcristian/groundwork-metrics   {:git/tag "v0.1.4" :git/sha "bf81c46"}
   ;; the settings, options and kinds, checked before anything runs
   metosin/malli                 {:mvn/version "0.20.3"}}
 
  :aliases
- {;; the tests:  clojure -X:test  (the Postgres ones need BACKROOM_TEST_PORT, see README.md)
+ {;; the tests:  clojure -X:test  (the Postgres ones need BACKGROUND_JOBS_TEST_PORT, see README.md)
   :test {:extra-paths ["test-code"]
          :extra-deps  {io.github.cognitect-labs/test-runner {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
          :exec-fn     cognitect.test-runner.api/test

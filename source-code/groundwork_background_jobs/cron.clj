@@ -1,4 +1,4 @@
-(ns backroom.cron
+(ns groundwork-background-jobs.cron
   "Cron lines in UTC: minute hour day-of-month month day-of-week; *,
    numbers, lists a,b, ranges a-b, steps */n.
 
@@ -22,7 +22,7 @@
                                      :else                     (let [n (parse-long span)]
                                                                  [n (if (str/includes? part "/") hi n)]))]
                    (when-not (and a b step (<= lo a b hi) (pos? step))
-                     (throw (ex-info (str "Not a cron field: " field) {:type :backroom/bad-cron :field field})))
+                     (throw (ex-info (str "Not a cron field: " field) {:type :groundwork-background-jobs/bad-cron :field field})))
                    (range a (inc b) step)))
                (str/split field #","))))
 
@@ -32,7 +32,7 @@
   [line]
   (let [[mi h dom mo dow :as fields] (str/split (str/trim line) #"\s+")]
     (when-not (= 5 (count fields))
-      (throw (ex-info (str "A cron line has five fields: " line) {:type :backroom/bad-cron :line line})))
+      (throw (ex-info (str "A cron line has five fields: " line) {:type :groundwork-background-jobs/bad-cron :line line})))
     {:minutes  (field-values mi 0 59)
      :hours    (field-values h 0 23)
      :days     (field-values dom 1 31)
@@ -61,7 +61,7 @@
            n 0]
       (cond
         (> n most-steps)
-        (throw (ex-info (str "This cron line never comes: " line) {:type :backroom/bad-cron :line line}))
+        (throw (ex-info (str "This cron line never comes: " line) {:type :groundwork-background-jobs/bad-cron :line line}))
 
         (not (contains? months (.getMonthValue t)))
         (recur (.withDayOfMonth (.plusMonths (.truncatedTo t ChronoUnit/DAYS) 1) 1) (inc n))

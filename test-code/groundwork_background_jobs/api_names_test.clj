@@ -1,9 +1,9 @@
-(ns backroom.api-names-test
-  "The public names of backroom.api. Adding or removing one fails here, so
+(ns groundwork-background-jobs.api-names-test
+  "The public names of groundwork-background-jobs.api. Adding or removing one fails here, so
    the api changes on purpose."
   (:require
    [clojure.test :refer [deftest is]]
-   [backroom.api]))
+   [groundwork-background-jobs.api]))
 
 (deftest the-api-names
   (is (= '#{settings-shape
@@ -17,4 +17,4 @@
            list-queued-background-jobs
            list-dead-background-jobs
            run-background-job-again-now!}
-         (set (keys (ns-publics 'backroom.api))))))
+         (set (keys (ns-publics 'groundwork-background-jobs.api))))))

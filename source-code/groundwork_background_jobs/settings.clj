@@ -1,12 +1,12 @@
-(ns backroom.settings
-  "backroom's settings, and the data its functions take, as malli shapes,
+(ns groundwork-background-jobs.settings
+  "groundwork-background-jobs's settings, and the data its functions take, as malli shapes,
    checked before anything runs. Nothing has a default: every key is
    written out (nil where it is a choice), and a missing or unknown one
    refuses, named, with every other problem at once. They are checked by
-   malli itself, not through wire: they are values the app hands in, not
+   malli itself, not through groundwork-shaped-json: they are values the app hands in, not
    data crossing an edge. The functions that keep or read a background
-   job's params take the app's wire under :wire in their options; backroom
-   never makes one. start-workers! takes the app's log under :log; backroom
+   job's params take the app's shaper under :shaper in their options; groundwork-background-jobs
+   never makes one. start-workers! takes the app's log under :log; groundwork-background-jobs
    never decides how a line is written."
   (:require
    [malli.core :as malli]
@@ -26,7 +26,7 @@
                      [:job-run-seconds [:vector {:min 1} number?]]]]])
 
 (def settings-shape
-  "The part of an app's settings that is backroom's, every key required.
+  "The part of an app's settings that is groundwork-background-jobs's, every key required.
    :workers: background jobs running at once on this server.
    :poll-ms: how often the workers look for due background jobs (and due
    schedules, and stuck background jobs).
@@ -42,7 +42,7 @@
    :forget-done-every-ms: how often the workers delete them.
    :stop-wait-ms: how long stop-workers! waits for the running background
    jobs to finish.
-   :metric-buckets: the upper bounds of backroom's histogram, in seconds,
+   :metric-buckets: the upper bounds of groundwork-background-jobs's histogram, in seconds,
    ascending (meter checks them): {:job-run-seconds […]}, how long a run
    takes. No default: what a job takes is the app's to say."
   (into [:map {:closed true}] settings-entries))
@@ -50,7 +50,7 @@
 (def kind-shape
   "A background job kind, every key required. :name, a namespaced keyword;
    :system-actor, the named system actor its one transaction runs as (a
-   keyword without a namespace, :order-emails: doorman's, in groundwork,
+   keyword without a namespace, :order-emails: groundwork-access's, in groundwork,
    whose sentences say what the job reaches), handed to the workers'
    :run-in-transaction-as; :params-shape, the malli shape its params fit;
    :run, (fn [context params]), the context {:transaction
@@ -72,42 +72,42 @@
    [:params :any]
    [:cron :string]])
 
-(def wire-entry
-  "The app's wire (wire.api's make-wire-from-settings), made once by the
+(def shaper-entry
+  "The app's shaper (groundwork-shaped-json.api's make-shaper-from-settings), made once by the
    app: a background job's params go into the queue as JSON text by it and
    come out by it."
-  [:wire [some? {:error/message "should be the app's wire, made by wire.api/make-wire-from-settings"}]])
+  [:shaper [some? {:error/message "should be the app's shaper, made by groundwork-shaped-json.api/make-shaper-from-settings"}]])
 
 (def log-entry
-  "The app's log function, (log level event data), made by logbook's
+  "The app's log function, (log level event data), made by groundwork-logs's
    log-function or with-context: a failure, a background job given up and
    a dispatcher that failed are written to it, and each run gets one with
    its background job's id and kind as context."
-  [:log [fn? {:error/message "should be the app's log function, made by logbook"}]])
+  [:log [fn? {:error/message "should be the app's log function, made by groundwork-logs"}]])
 
 (def meter-entry
-  "The app's meter, made by meter's make-meter: start-workers! declares
-   backroom's metrics on it, and the workers and add-background-job-to-queue!
+  "The app's meter, made by groundwork-metrics's make-meter: start-workers! declares
+   groundwork-background-jobs's metrics on it, and the workers and add-background-job-to-queue!
    count into it. A value make-meter didn't make is refused by meter
-   (:meter/not-a-meter)."
-  [:meter [some? {:error/message "should be the app's meter, made by meter.api/make-meter"}]])
+   (:groundwork-metrics/not-a-meter)."
+  [:meter [some? {:error/message "should be the app's meter, made by groundwork-metrics.api/make-meter"}]])
 
 (def run-in-transaction-as-entry
   "How a background job's one transaction is opened, the app's: (fn [pool
    system-actor log f]) runs (f transaction) in one transaction of its own,
-   as the kind's :system-actor, carrying log (cellar's :log: the job's,
+   as the kind's :system-actor, carrying log (groundwork-postgres's :log: the job's,
    with its id and kind, where work kept for after the commit that fails
    is written), and returns what f returns; a throw rolls it back. In
-   groundwork, doorman's run-as-system! with {:read-only? false :log log}.
-   backroom knows no actor: it hands the kind's name over."
-  [:run-in-transaction-as [fn? {:error/message "should be the app's (fn [pool system-actor log f]), doorman's run-as-system! in groundwork"}]])
+   groundwork, groundwork-access's run-as-system! with {:read-only? false :log log}.
+   groundwork-background-jobs knows no actor: it hands the kind's name over."
+  [:run-in-transaction-as [fn? {:error/message "should be the app's (fn [pool system-actor log f]), groundwork-access's run-as-system! in groundwork"}]])
 
 (def workers-options-shape
-  "start-workers!'s options: the app's wire, log and meter, how a job's
+  "start-workers!'s options: the app's shaper, log and meter, how a job's
    transaction is opened (:run-in-transaction-as), the settings, the kinds
    this server runs and the schedules, every key required."
   (into [:map {:closed true}
-         wire-entry
+         shaper-entry
          log-entry
          meter-entry
          run-in-transaction-as-entry
@@ -117,13 +117,13 @@
 
 (def queue-options-shape
   "add-background-job-to-queue!'s options, every key required.
-   :wire: the app's wire, which the params are kept by.
+   :shaper: the app's shaper, which the params are kept by.
    :meter: the app's meter, which the job added is counted on.
    :run-in-ms: run no sooner than this, 0 for now.
    :key: nil, or text: one background job of this key for as long as it is
    remembered; a second one queues nothing and returns the first one's id."
   [:map {:closed true}
-   wire-entry
+   shaper-entry
    meter-entry
    [:run-in-ms [:int {:min 0}]]
    [:key [:maybe :string]]])
@@ -139,10 +139,10 @@
   data)
 
 (defn check-workers-options [options]
-  (check-data-for-shape "The options" :backroom/bad-options workers-options-shape options))
+  (check-data-for-shape "The options" :groundwork-background-jobs/bad-options workers-options-shape options))
 
 (defn check-kind [kind]
-  (check-data-for-shape "The kind's keys" :backroom/bad-kind kind-shape kind))
+  (check-data-for-shape "The kind's keys" :groundwork-background-jobs/bad-kind kind-shape kind))
 
 (defn check-queue-options [options]
-  (check-data-for-shape "The options" :backroom/bad-options queue-options-shape options))
+  (check-data-for-shape "The options" :groundwork-background-jobs/bad-options queue-options-shape options))

@@ -1,11 +1,11 @@
-(ns backroom.test-wire
-  "The tests' wire, made as an app makes its own: once, from wire's
-   settings, every key written out (the values wire v0.1 had in effect)."
+(ns groundwork-background-jobs.test-shaper
+  "The tests' groundwork-shaped-json, made as an app makes its own: once, from groundwork-shaped-json's
+   settings, every key written out (the values groundwork-shaped-json v0.1 had in effect)."
   (:require
-   [wire.api :as wire]))
+   [groundwork-shaped-json.api :as shaped-json]))
 
-(def wire
-  (wire/make-wire-from-settings
+(def shaper
+  (shaped-json/make-shaper-from-settings
    {:most-shapes-kept 1000
     :json-limits      {:max-nesting-depth         1000
                        :max-number-length         1000
